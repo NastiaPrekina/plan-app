@@ -75,6 +75,34 @@ type GroupMember = {
   joined_at?: string
 }
 
+type GroupIntegration = {
+  id: string
+  group_id: string
+  provider: 'google_sheets'
+  spreadsheet_id: string
+  sheet_name: string
+  created_by: string
+  created_at?: string
+  updated_at?: string
+}
+
+type GoogleSheetValidation = {
+  status: 'passed' | 'warning' | 'failed'
+  valid: boolean
+  missingHeaders: string[]
+  warnings: string[]
+  technicalColumnMissing: boolean
+}
+
+type GoogleSheetCheckResult = {
+  serviceAccountEmail: string
+  spreadsheetId: string
+  spreadsheetTitle: string
+  sheetName: string
+  headers: string[]
+  validation: GoogleSheetValidation
+}
+
 function App() {
   const [session, setSession] = useState<Session | null>(null)
   const [authLoading, setAuthLoading] = useState(true)
@@ -108,6 +136,16 @@ function App() {
   const [groupNameDraft, setGroupNameDraft] = useState('')
   const [groupNameBusy, setGroupNameBusy] = useState(false)
   const [groupNameError, setGroupNameError] = useState('')
+  const [googleSheetIntegration, setGoogleSheetIntegration] =
+    useState<GroupIntegration | null>(null)
+  const [googleSheetLoading, setGoogleSheetLoading] = useState(false)
+  const [googleSheetBusy, setGoogleSheetBusy] = useState(false)
+  const [googleSheetFormOpen, setGoogleSheetFormOpen] = useState(false)
+  const [googleSheetUrl, setGoogleSheetUrl] = useState('')
+  const [googleServiceAccountEmail, setGoogleServiceAccountEmail] = useState('')
+  const [googleSheetCheck, setGoogleSheetCheck] =
+    useState<GoogleSheetCheckResult | null>(null)
+  const [googleSheetError, setGoogleSheetError] = useState('')
 
   const [plans, setPlans] = useState<Plan[]>([])
   const [planEvents, setPlanEvents] = useState<PlanEvent[]>([])
@@ -201,6 +239,10 @@ function App() {
       setProfile(null)
       setProfileName('')
       setGroupMembers([])
+      setGoogleSheetIntegration(null)
+      setGoogleSheetFormOpen(false)
+      setGoogleSheetCheck(null)
+      setGoogleSheetError('')
       setSelectedPlan(null)
       setEditingPlan(null)
       setSchedulingPlan(null)
@@ -376,6 +418,7 @@ function App() {
       loadAppData(loadedGroup.id),
       loadProfile(),
       loadGroupMembers(loadedGroup.id),
+      loadGoogleSheetIntegration(loadedGroup.id),
     ])
   }
 
@@ -461,6 +504,7 @@ function App() {
       loadAppData(createdGroup.id),
       loadProfile(),
       loadGroupMembers(createdGroup.id),
+      loadGoogleSheetIntegration(createdGroup.id),
     ])
   }
 
@@ -531,6 +575,7 @@ function App() {
       loadAppData(joinedGroup.id),
       loadProfile(),
       loadGroupMembers(joinedGroup.id),
+      loadGoogleSheetIntegration(joinedGroup.id),
     ])
   }
 
@@ -658,6 +703,244 @@ function App() {
     setGroupNameDraft('')
     setEditingGroupName(false)
     setGroupNameBusy(false)
+  }
+
+  async function loadGoogleSheetIntegration(groupId: string) {
+    setGoogleSheetLoading(true)
+
+    const { data, error } = await supabase
+      .from('group_integrations')
+      .select('*')
+      .eq('group_id', groupId)
+      .eq('provider', 'google_sheets')
+      .maybeSingle()
+
+    if (error) {
+      console.error('Ошибка загрузки интеграции Google Sheets:', error)
+      setGoogleSheetError('Не удалось загрузить подключение Google Таблицы.')
+      setGoogleSheetLoading(false)
+      return
+    }
+
+    setGoogleSheetIntegration(
+      data
+        ? {
+            id: String(data.id),
+            group_id: String(data.group_id),
+            provider: 'google_sheets',
+            spreadsheet_id: String(data.spreadsheet_id),
+            sheet_name: String(data.sheet_name ?? ''),
+            created_by: String(data.created_by),
+            created_at: data.created_at ?? undefined,
+            updated_at: data.updated_at ?? undefined,
+          }
+        : null
+    )
+    setGoogleSheetError('')
+    setGoogleSheetLoading(false)
+  }
+
+  async function getEdgeFunctionErrorMessage(error: unknown) {
+    if (
+      typeof error === 'object' &&
+      error !== null &&
+      'context' in error &&
+      error.context instanceof Response
+    ) {
+      try {
+        const body = await error.context.clone().json() as { error?: string }
+        if (body.error) {
+          return body.error
+        }
+      } catch {
+        // Fall back to the SDK error message below.
+      }
+    }
+
+    return error instanceof Error ? error.message : 'Неизвестная ошибка.'
+  }
+
+  async function loadGoogleServiceAccountEmail() {
+    if (!activeGroup || activeGroupRole !== 'owner') {
+      return
+    }
+
+    const { data, error } = await supabase.functions.invoke(
+      'google-sheets-integration',
+      {
+        body: {
+          action: 'service_account_info',
+          group_id: activeGroup.id,
+        },
+      }
+    )
+
+    if (error) {
+      setGoogleSheetError(await getEdgeFunctionErrorMessage(error))
+      return
+    }
+
+    setGoogleServiceAccountEmail(String(data.serviceAccountEmail ?? ''))
+  }
+
+  async function openGoogleSheetForm() {
+    if (!activeGroup || activeGroupRole !== 'owner') {
+      return
+    }
+
+    setGoogleSheetFormOpen(true)
+    setGoogleSheetCheck(null)
+    setGoogleSheetError('')
+    setGoogleSheetUrl(
+      googleSheetIntegration
+        ? `https://docs.google.com/spreadsheets/d/${googleSheetIntegration.spreadsheet_id}/edit`
+        : ''
+    )
+
+    if (!googleServiceAccountEmail) {
+      await loadGoogleServiceAccountEmail()
+    }
+  }
+
+  function closeGoogleSheetForm() {
+    if (googleSheetBusy) {
+      return
+    }
+
+    setGoogleSheetFormOpen(false)
+    setGoogleSheetCheck(null)
+    setGoogleSheetError('')
+  }
+
+  async function checkGoogleSheet(urlOverride?: string) {
+    if (!activeGroup || activeGroupRole !== 'owner') {
+      return
+    }
+
+    const spreadsheetUrl = (urlOverride ?? googleSheetUrl).trim()
+
+    if (!spreadsheetUrl) {
+      setGoogleSheetError('Вставьте ссылку на Google Таблицу.')
+      return
+    }
+
+    setGoogleSheetBusy(true)
+    setGoogleSheetError('')
+    setGoogleSheetCheck(null)
+
+    const { data, error } = await supabase.functions.invoke(
+      'google-sheets-integration',
+      {
+        body: {
+          action: 'validate',
+          group_id: activeGroup.id,
+          spreadsheet_url: spreadsheetUrl,
+        },
+      }
+    )
+
+    if (error) {
+      setGoogleSheetError(await getEdgeFunctionErrorMessage(error))
+      setGoogleSheetBusy(false)
+      return
+    }
+
+    const result = data as GoogleSheetCheckResult
+    setGoogleServiceAccountEmail(result.serviceAccountEmail)
+    setGoogleSheetCheck(result)
+    setGoogleSheetBusy(false)
+  }
+
+  async function saveGoogleSheetIntegration() {
+    if (
+      !activeGroup ||
+      !session ||
+      activeGroupRole !== 'owner' ||
+      !googleSheetCheck?.validation.valid
+    ) {
+      return
+    }
+
+    setGoogleSheetBusy(true)
+    setGoogleSheetError('')
+
+    const integrationValues = {
+      group_id: activeGroup.id,
+      provider: 'google_sheets',
+      spreadsheet_id: googleSheetCheck.spreadsheetId,
+      sheet_name: googleSheetCheck.sheetName,
+    }
+    const query = googleSheetIntegration
+      ? supabase
+          .from('group_integrations')
+          .update(integrationValues)
+          .eq('id', googleSheetIntegration.id)
+      : supabase
+          .from('group_integrations')
+          .insert({
+            ...integrationValues,
+            created_by: session.user.id,
+          })
+    const { data, error } = await query.select().single()
+
+    if (error) {
+      console.error('Ошибка сохранения интеграции Google Sheets:', error)
+      setGoogleSheetError('Не удалось сохранить подключение Google Таблицы.')
+      setGoogleSheetBusy(false)
+      return
+    }
+
+    setGoogleSheetIntegration({
+      id: String(data.id),
+      group_id: String(data.group_id),
+      provider: 'google_sheets',
+      spreadsheet_id: String(data.spreadsheet_id),
+      sheet_name: String(data.sheet_name ?? ''),
+      created_by: String(data.created_by),
+      created_at: data.created_at ?? undefined,
+      updated_at: data.updated_at ?? undefined,
+    })
+    setGoogleSheetFormOpen(false)
+    setGoogleSheetCheck(null)
+    setGoogleSheetBusy(false)
+  }
+
+  async function disconnectGoogleSheet() {
+    if (
+      !activeGroup ||
+      activeGroupRole !== 'owner' ||
+      !googleSheetIntegration
+    ) {
+      return
+    }
+
+    const confirmed = window.confirm('Отключить Google Таблицу от этой группы?')
+
+    if (!confirmed) {
+      return
+    }
+
+    setGoogleSheetBusy(true)
+    setGoogleSheetError('')
+
+    const { error } = await supabase
+      .from('group_integrations')
+      .delete()
+      .eq('id', googleSheetIntegration.id)
+      .eq('group_id', activeGroup.id)
+
+    if (error) {
+      console.error('Ошибка отключения Google Sheets:', error)
+      setGoogleSheetError('Не удалось отключить Google Таблицу.')
+      setGoogleSheetBusy(false)
+      return
+    }
+
+    setGoogleSheetIntegration(null)
+    setGoogleSheetFormOpen(false)
+    setGoogleSheetCheck(null)
+    setGoogleSheetUrl('')
+    setGoogleSheetBusy(false)
   }
 
   async function saveProfile() {
@@ -1964,6 +2247,151 @@ function App() {
               )}
             </div>
           </div>
+        </div>
+
+        <h2 style={{ ...sectionTitleStyle, marginTop: 28 }}>
+          Google Таблица
+        </h2>
+
+        <div style={contentCardStyle}>
+          {googleSheetLoading && (
+            <div style={integrationMutedTextStyle}>Проверяю подключение…</div>
+          )}
+
+          {!googleSheetLoading && !googleSheetIntegration && !googleSheetFormOpen && (
+            <>
+              <div style={integrationMutedTextStyle}>
+                Google Таблица пока не подключена к этой группе.
+              </div>
+              {activeGroupRole === 'owner' && (
+                <button
+                  onClick={() => void openGoogleSheetForm()}
+                  style={{ ...secondaryButtonStyle, marginTop: 16 }}
+                >
+                  Подключить Google Таблицу
+                </button>
+              )}
+            </>
+          )}
+
+          {googleSheetFormOpen && activeGroupRole === 'owner' && (
+            <>
+              <div style={integrationInstructionStyle}>
+                Предоставьте этому service account доступ Editor к таблице:
+                <strong style={serviceAccountEmailStyle}>
+                  {googleServiceAccountEmail || 'Загружаю email…'}
+                </strong>
+              </div>
+
+              <label style={fieldLabelStyle}>Ссылка на Google Таблицу</label>
+              <input
+                value={googleSheetUrl}
+                onChange={(event) => {
+                  setGoogleSheetUrl(event.target.value)
+                  setGoogleSheetCheck(null)
+                  setGoogleSheetError('')
+                }}
+                placeholder="https://docs.google.com/spreadsheets/d/.../edit"
+                disabled={googleSheetBusy}
+                style={inputStyle}
+              />
+
+              <button
+                onClick={() => void checkGoogleSheet()}
+                disabled={googleSheetBusy}
+                style={{
+                  ...secondaryButtonStyle,
+                  marginTop: 14,
+                  opacity: googleSheetBusy ? 0.6 : 1,
+                }}
+              >
+                {googleSheetBusy ? 'Проверяю…' : 'Проверить подключение'}
+              </button>
+
+              {googleSheetCheck && (
+                <SheetValidationResult result={googleSheetCheck} />
+              )}
+
+              {googleSheetCheck?.validation.valid && (
+                <button
+                  onClick={() => void saveGoogleSheetIntegration()}
+                  disabled={googleSheetBusy}
+                  style={{
+                    ...mainButtonStyle,
+                    marginTop: 14,
+                    opacity: googleSheetBusy ? 0.6 : 1,
+                  }}
+                >
+                  {googleSheetBusy ? 'Сохраняю…' : 'Сохранить подключение'}
+                </button>
+              )}
+
+              <button
+                onClick={closeGoogleSheetForm}
+                disabled={googleSheetBusy}
+                style={cancelButtonStyle}
+              >
+                Отмена
+              </button>
+            </>
+          )}
+
+          {!googleSheetLoading && googleSheetIntegration && !googleSheetFormOpen && (
+            <>
+              <div style={integrationConnectedStyle}>
+                ✅ Google Таблица подключена
+              </div>
+              <div style={integrationDetailsStyle}>
+                <div>Вкладка: {googleSheetIntegration.sheet_name || 'не указана'}</div>
+                <div>ID: {googleSheetIntegration.spreadsheet_id}</div>
+              </div>
+
+              {googleSheetCheck && (
+                <SheetValidationResult result={googleSheetCheck} />
+              )}
+
+              <button disabled style={disabledSyncButtonStyle}>
+                🔄 Обновить из таблицы
+                <span style={{ display: 'block', marginTop: 3, fontSize: 11 }}>
+                  Будет доступно на следующем этапе
+                </span>
+              </button>
+
+              {activeGroupRole === 'owner' && (
+                <div style={integrationActionsStyle}>
+                  <button
+                    onClick={() =>
+                      void checkGoogleSheet(
+                        `https://docs.google.com/spreadsheets/d/${googleSheetIntegration.spreadsheet_id}/edit`
+                      )
+                    }
+                    disabled={googleSheetBusy}
+                    style={copyInviteButtonStyle}
+                  >
+                    {googleSheetBusy ? 'Проверяю…' : 'Проверить снова'}
+                  </button>
+                  <button
+                    onClick={() => void openGoogleSheetForm()}
+                    disabled={googleSheetBusy}
+                    style={copyInviteButtonStyle}
+                  >
+                    Изменить таблицу
+                  </button>
+                  <button
+                    onClick={() => void disconnectGoogleSheet()}
+                    disabled={googleSheetBusy}
+                    style={integrationDisconnectButtonStyle}
+                  >
+                    Отключить
+                  </button>
+                </div>
+              )}
+            </>
+          )}
+
+          {googleSheetError && (
+            <div style={authErrorStyle}>{googleSheetError}</div>
+          )}
         </div>
 
         <h2 style={{ ...sectionTitleStyle, marginTop: 28 }}>
@@ -3546,6 +3974,47 @@ function BottomNavigation({
   )
 }
 
+function SheetValidationResult({ result }: { result: GoogleSheetCheckResult }) {
+  const validation = result.validation
+  const background =
+    validation.status === 'failed'
+      ? '#fff1f1'
+      : validation.status === 'warning'
+        ? '#fff9e8'
+        : '#f2f8f2'
+  const color = validation.status === 'failed' ? '#9b1c1c' : '#355b3b'
+
+  return (
+    <div style={{ ...sheetValidationStyle, background, color }}>
+      <div style={{ fontWeight: 700 }}>
+        {validation.status === 'failed'
+          ? '❌ Структура не прошла проверку'
+          : validation.status === 'warning'
+            ? '⚠️ Таблица доступна, есть предупреждения'
+            : '✅ Структура таблицы подходит'}
+      </div>
+      <div style={sheetValidationDetailsStyle}>
+        <div>Файл: {result.spreadsheetTitle}</div>
+        <div>ID: {result.spreadsheetId}</div>
+        <div>Вкладка: {result.sheetName}</div>
+        <div>Найдено заголовков: {result.headers.length}</div>
+      </div>
+
+      {validation.missingHeaders.length > 0 && (
+        <div style={{ marginTop: 8 }}>
+          Отсутствуют: {validation.missingHeaders.join(', ')}
+        </div>
+      )}
+      {validation.technicalColumnMissing && (
+        <div style={{ marginTop: 6 }}>
+          technicalColumnMissing: true — столбец _plan_id будет добавлен на
+          следующем этапе.
+        </div>
+      )}
+    </div>
+  )
+}
+
 
 function InfoRow({
   label,
@@ -3668,6 +4137,89 @@ const inlineErrorStyle = {
   color: '#9b1c1c',
   fontSize: 13,
   lineHeight: 1.4,
+}
+
+const integrationMutedTextStyle = {
+  color: '#777',
+  fontSize: 14,
+  lineHeight: 1.5,
+}
+
+const integrationInstructionStyle = {
+  padding: 12,
+  borderRadius: 10,
+  background: '#f7f7f7',
+  color: '#555',
+  fontSize: 13,
+  lineHeight: 1.5,
+}
+
+const serviceAccountEmailStyle = {
+  display: 'block',
+  marginTop: 5,
+  color: '#222',
+  overflowWrap: 'anywhere' as const,
+}
+
+const integrationConnectedStyle = {
+  color: '#2f6b3a',
+  fontSize: 16,
+  fontWeight: 700,
+}
+
+const integrationDetailsStyle = {
+  display: 'grid',
+  gap: 4,
+  marginTop: 10,
+  color: '#666',
+  fontSize: 13,
+  overflowWrap: 'anywhere' as const,
+}
+
+const integrationActionsStyle = {
+  display: 'flex',
+  flexWrap: 'wrap' as const,
+  gap: 8,
+  marginTop: 12,
+}
+
+const integrationDisconnectButtonStyle = {
+  flexShrink: 0,
+  padding: '8px 10px',
+  border: '1px solid #ddd',
+  borderRadius: 9,
+  background: 'white',
+  color: '#9b1c1c',
+  fontSize: 13,
+  cursor: 'pointer',
+  fontFamily: 'inherit',
+}
+
+const disabledSyncButtonStyle = {
+  width: '100%',
+  marginTop: 16,
+  padding: '11px 12px',
+  border: '1px solid #ddd',
+  borderRadius: 10,
+  background: '#f4f4f4',
+  color: '#888',
+  cursor: 'not-allowed',
+  fontFamily: 'inherit',
+}
+
+const sheetValidationStyle = {
+  marginTop: 14,
+  padding: 12,
+  borderRadius: 10,
+  fontSize: 13,
+  lineHeight: 1.45,
+}
+
+const sheetValidationDetailsStyle = {
+  display: 'grid',
+  gap: 3,
+  marginTop: 8,
+  overflowWrap: 'anywhere' as const,
 }
 
 const memberCardStyle = {
