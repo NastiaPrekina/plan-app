@@ -53,6 +53,7 @@ type RatingSummary = {
 type AppView =
   | 'home'
   | 'recommendations'
+  | 'places'
   | 'ranking'
   | 'discovery'
   | 'group'
@@ -118,6 +119,28 @@ type UserPreferences = {
   calibration_completed_at?: string | null
 }
 
+type PlaceKind = 'restaurant' | 'cafe' | 'bar'
+
+type DiscoveredPlace = {
+  catalog_id: string | null
+  source: string
+  source_place_id: string
+  name: string
+  kind: PlaceKind
+  categories: string[]
+  cuisine: string[]
+  address: string | null
+  lat: number | null
+  lon: number | null
+  website: string | null
+  phone: string | null
+  rating: number | null
+  popularity: number | null
+  price_level: number | null
+  opening_hours: unknown | null
+  source_url: string | null
+}
+
 const DISCOVERY_LOCATIONS = [
   { slug: 'msk', name: 'Москва' },
   { slug: 'spb', name: 'Санкт-Петербург' },
@@ -127,6 +150,12 @@ const DISCOVERY_PERIODS = [
   { days: 1, label: 'Сегодня' },
   { days: 7, label: '7 дней' },
   { days: 30, label: '30 дней' },
+] as const
+
+const PLACE_KINDS = [
+  { kind: 'restaurant', label: '🍽 Рестораны' },
+  { kind: 'cafe', label: '☕ Кафе' },
+  { kind: 'bar', label: '🍸 Бары' },
 ] as const
 
 function App() {
@@ -201,6 +230,12 @@ function App() {
   const [recommendationsOffset, setRecommendationsOffset] = useState(0)
   const [recommendationsFeedbackCount, setRecommendationsFeedbackCount] =
     useState(0)
+  const [placeKind, setPlaceKind] = useState<PlaceKind>('restaurant')
+  const [placeCity, setPlaceCity] = useState('')
+  const [places, setPlaces] = useState<DiscoveredPlace[]>([])
+  const [placesLoading, setPlacesLoading] = useState(false)
+  const [placesSearched, setPlacesSearched] = useState(false)
+  const [placesError, setPlacesError] = useState('')
 
   const [plans, setPlans] = useState<Plan[]>([])
   const [planEvents, setPlanEvents] = useState<PlanEvent[]>([])
@@ -303,6 +338,9 @@ function App() {
       setRecommendationsSearched(false)
       setRecommendationsOffset(0)
       setRecommendationsFeedbackCount(0)
+      setPlaces([])
+      setPlacesSearched(false)
+      setPlaceCity('')
       setSelectedPlan(null)
       setEditingPlan(null)
       setSchedulingPlan(null)
@@ -919,6 +957,38 @@ function App() {
       return next
     })
     setRecommendationsLoading(false)
+  }
+
+  async function searchPlaces() {
+    if (!session || placesLoading) return
+
+    const effectiveCity = placeCity || userPreferences?.city || ''
+    if (!effectiveCity) {
+      setPlacesError('Выберите город для поиска мест.')
+      return
+    }
+
+    setPlacesLoading(true)
+    setPlacesSearched(true)
+    setPlacesError('')
+    const { data, error } = await supabase.functions.invoke('place-discovery', {
+      body: {
+        action: 'search_places',
+        kind: placeKind,
+        city: placeCity || undefined,
+        limit: 20,
+      },
+    })
+
+    if (error) {
+      setPlaces([])
+      setPlacesError(await getEdgeFunctionErrorMessage(error))
+      setPlacesLoading(false)
+      return
+    }
+
+    setPlaces(Array.isArray(data?.places) ? data.places as DiscoveredPlace[] : [])
+    setPlacesLoading(false)
   }
 
   function navigateTo(view: AppView) {
@@ -2618,6 +2688,113 @@ function App() {
             Перейти в Афишу
           </button>
         </div>
+      </div>
+    )
+  }
+
+  if (activeView === 'places') {
+    const effectivePlaceCity = placeCity || userPreferences?.city || ''
+
+    return (
+      <div style={pageContainerStyle}>
+        <UserBar
+          email={userEmail}
+          displayName={userDisplayName}
+          groupName={activeGroup.name}
+          canEditGroup={activeGroupRole === 'owner'}
+          busy={authBusy}
+          onOpenProfile={() => setActiveView('profile')}
+          onOpenGroup={() => setActiveView('group')}
+          onLogout={handleSignOut}
+        />
+
+        <h1 style={pageTitleStyle}>🍽 Места</h1>
+        <p style={pageDescriptionStyle}>
+          Реальные рестораны, кафе и бары в вашем городе.
+        </p>
+
+        <div style={contentCardStyle}>
+          <div style={placeKindSelectorStyle}>
+            {PLACE_KINDS.map((item) => (
+              <button
+                key={item.kind}
+                type="button"
+                onClick={() => {
+                  setPlaceKind(item.kind)
+                  setPlaces([])
+                  setPlacesSearched(false)
+                  setPlacesError('')
+                }}
+                disabled={placesLoading}
+                aria-pressed={placeKind === item.kind}
+                style={{
+                  ...placeKindButtonStyle,
+                  ...(placeKind === item.kind ? placeKindButtonActiveStyle : {}),
+                }}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+
+          <label style={fieldLabelStyle}>Город</label>
+          <select
+            value={effectivePlaceCity}
+            onChange={(event) => {
+              setPlaceCity(event.target.value)
+              setPlaces([])
+              setPlacesSearched(false)
+              setPlacesError('')
+            }}
+            disabled={placesLoading}
+            style={inputStyle}
+          >
+            {!effectivePlaceCity && <option value="">Выберите город</option>}
+            {DISCOVERY_LOCATIONS.map((location) => (
+              <option key={location.slug} value={location.slug}>
+                {location.name}
+              </option>
+            ))}
+          </select>
+
+          <button
+            onClick={() => void searchPlaces()}
+            disabled={placesLoading || !effectivePlaceCity}
+            style={{
+              ...mainButtonStyle,
+              marginTop: 18,
+              opacity: placesLoading || !effectivePlaceCity ? 0.6 : 1,
+            }}
+          >
+            {placesLoading ? 'Ищу…' : 'Найти места'}
+          </button>
+        </div>
+
+        {placesError && <div style={authErrorStyle}>{placesError}</div>}
+
+        {!placesLoading && placesSearched && !placesError && places.length === 0 && (
+          <div style={emptyRankingStyle}>Подходящие места не найдены.</div>
+        )}
+
+        {!placesLoading && places.length > 0 && (
+          <div style={placeListStyle}>
+            {places.map((place) => (
+              <PlaceCard
+                key={`${place.source}:${place.source_place_id}`}
+                place={place}
+              />
+            ))}
+          </div>
+        )}
+
+        <BottomNavigation
+          activeView={activeView}
+          onNavigate={navigateTo}
+          onAdd={() => {
+            setActiveView('home')
+            setShowAddForm(true)
+          }}
+        />
       </div>
     )
   }
@@ -4806,6 +4983,71 @@ function DiscoveryEventCard({
   )
 }
 
+function PlaceCard({ place }: { place: DiscoveredPlace }) {
+  const sourceName = place.source === 'foursquare'
+    ? 'Foursquare'
+    : place.source
+  const phoneHref = place.phone
+    ? `tel:${place.phone.replace(/[^+\d]/g, '')}`
+    : null
+
+  return (
+    <article style={placeCardStyle}>
+      <h2 style={discoveryCardTitleStyle}>{place.name}</h2>
+
+      {place.categories.length > 0 && (
+        <div style={placeTagListStyle}>
+          {place.categories.map((category) => (
+            <span key={category} style={placeTagStyle}>{category}</span>
+          ))}
+        </div>
+      )}
+
+      {place.cuisine.length > 0 && (
+        <div style={placeDetailStyle}>
+          <strong>Кухня:</strong> {place.cuisine.join(', ')}
+        </div>
+      )}
+      {place.address && (
+        <div style={placeDetailStyle}>📍 {place.address}</div>
+      )}
+      {place.rating !== null && (
+        <div style={placeDetailStyle}>⭐ {place.rating.toFixed(1)}/10</div>
+      )}
+      {place.price_level !== null && (
+        <div style={placeDetailStyle}>
+          Ценовой уровень: {'₽'.repeat(place.price_level)}
+        </div>
+      )}
+      {place.website && (
+        <a
+          href={place.website}
+          target="_blank"
+          rel="noreferrer"
+          style={placeLinkStyle}
+        >
+          Сайт
+        </a>
+      )}
+      {place.phone && phoneHref && (
+        <a href={phoneHref} style={placeLinkStyle}>{place.phone}</a>
+      )}
+      {place.source_url && (
+        <a
+          href={place.source_url}
+          target="_blank"
+          rel="noreferrer"
+          style={placeLinkStyle}
+        >
+          Подробнее в источнике
+        </a>
+      )}
+
+      <div style={placeSourceStyle}>Источник: {sourceName}</div>
+    </article>
+  )
+}
+
 function BottomNavigation({
   activeView,
   onNavigate,
@@ -4843,6 +5085,15 @@ function BottomNavigation({
         }}
       >
         ✨ Для меня
+      </button>
+      <button
+        onClick={() => onNavigate('places')}
+        style={{
+          ...navButtonStyle,
+          fontWeight: activeView === 'places' ? 700 : 400,
+        }}
+      >
+        🍽 Места
       </button>
       <button
         onClick={() => onNavigate('ranking')}
@@ -5066,6 +5317,83 @@ const discoveryListStyle = {
   display: 'grid',
   gap: 14,
   marginTop: 20,
+}
+
+const placeKindSelectorStyle = {
+  display: 'grid',
+  gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
+  gap: 7,
+}
+
+const placeKindButtonStyle = {
+  minHeight: 46,
+  padding: '8px 5px',
+  border: '1px solid #ddd',
+  borderRadius: 11,
+  background: 'white',
+  color: '#444',
+  fontSize: 13,
+  cursor: 'pointer',
+  fontFamily: 'inherit',
+}
+
+const placeKindButtonActiveStyle = {
+  borderColor: '#222',
+  background: '#222',
+  color: 'white',
+  fontWeight: 700,
+}
+
+const placeListStyle = {
+  display: 'grid',
+  gap: 14,
+  marginTop: 20,
+}
+
+const placeCardStyle = {
+  padding: 17,
+  border: '1px solid #e5e5e5',
+  borderRadius: 16,
+  background: 'white',
+}
+
+const placeTagListStyle = {
+  display: 'flex',
+  flexWrap: 'wrap' as const,
+  gap: 6,
+  marginBottom: 12,
+}
+
+const placeTagStyle = {
+  padding: '4px 8px',
+  borderRadius: 999,
+  background: '#f3f3f3',
+  color: '#555',
+  fontSize: 12,
+}
+
+const placeDetailStyle = {
+  marginTop: 8,
+  color: '#444',
+  fontSize: 14,
+  lineHeight: 1.45,
+}
+
+const placeLinkStyle = {
+  display: 'inline-block',
+  marginTop: 12,
+  marginRight: 14,
+  color: '#315f9b',
+  fontSize: 14,
+  textDecoration: 'none',
+}
+
+const placeSourceStyle = {
+  marginTop: 15,
+  paddingTop: 11,
+  borderTop: '1px solid #eee',
+  color: '#888',
+  fontSize: 12,
 }
 
 const discoveryCardStyle = {
@@ -5433,14 +5761,15 @@ const bottomNavStyle = {
   borderTop: '1px solid #eee',
   padding: '12px 10px calc(12px + env(safe-area-inset-bottom))',
   display: 'flex',
-  justifyContent: 'center',
+  justifyContent: 'flex-start',
   gap: 4,
+  overflowX: 'auto' as const,
+  WebkitOverflowScrolling: 'touch' as const,
   zIndex: 10,
 }
 
 const navButtonStyle = {
-  flex: '1 1 0',
-  maxWidth: 100,
+  flex: '0 0 78px',
   border: 0,
   background: 'transparent',
   color: '#222',
