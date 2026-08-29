@@ -64,6 +64,21 @@ type AppView =
 type AuthMode = 'login' | 'register'
 type CalendarMode = 'month' | 'list'
 
+type GoogleCalendarConnection = {
+  calendar_id: string
+  connected_at: string
+  last_sync_at: string | null
+  sync_enabled: boolean
+  status: 'connected' | 'needs_reauth'
+}
+
+type GoogleCalendarSyncResult = {
+  created: number
+  updated: number
+  deleted: number
+  synced_at: string
+}
+
 type Group = {
   id: string
   name: string
@@ -193,6 +208,13 @@ function localTimeValue(value: Date) {
   return `${String(value.getHours()).padStart(2, '0')}:${String(value.getMinutes()).padStart(2, '0')}`
 }
 
+function normalizeInstagramUrl(value: string | null | undefined) {
+  const instagram = value?.trim()
+  if (!instagram) return ''
+  if (/^https?:\/\//i.test(instagram)) return instagram
+  return `https://www.instagram.com/${instagram.replace(/^@/, '')}`
+}
+
 function formatCalendarDate(value: Date) {
   const todayDate = new Date()
   const tomorrowDate = new Date(todayDate.getFullYear(), todayDate.getMonth(), todayDate.getDate() + 1)
@@ -315,6 +337,14 @@ function App() {
   const [calendarEditComment, setCalendarEditComment] = useState('')
   const [calendarEventBusy, setCalendarEventBusy] = useState(false)
   const [calendarError, setCalendarError] = useState('')
+  const [googleCalendarConnection, setGoogleCalendarConnection] =
+    useState<GoogleCalendarConnection | null>(null)
+  const [googleCalendarLoading, setGoogleCalendarLoading] = useState(false)
+  const [googleCalendarBusy, setGoogleCalendarBusy] = useState(false)
+  const [googleCalendarError, setGoogleCalendarError] = useState('')
+  const [googleCalendarMessage, setGoogleCalendarMessage] = useState('')
+  const [googleCalendarSyncResult, setGoogleCalendarSyncResult] =
+    useState<GoogleCalendarSyncResult | null>(null)
 
   const [plans, setPlans] = useState<Plan[]>([])
   const [planEvents, setPlanEvents] = useState<PlanEvent[]>([])
@@ -431,6 +461,10 @@ function App() {
       setPlacePlanBusy('')
       setPlacePlanMessage('')
       setPlacePlanError('')
+      setGoogleCalendarConnection(null)
+      setGoogleCalendarError('')
+      setGoogleCalendarMessage('')
+      setGoogleCalendarSyncResult(null)
       setSelectedPlan(null)
       setEditingPlan(null)
       setSchedulingPlan(null)
@@ -449,6 +483,29 @@ function App() {
     }, 60_000)
 
     return () => window.clearInterval(timer)
+  }, [session])
+
+  useEffect(() => {
+    if (!session || activeView !== 'calendar') return
+    void loadGoogleCalendarStatus()
+  }, [session, activeView])
+
+  useEffect(() => {
+    if (!session) return
+    const url = new URL(window.location.href)
+    const oauthResult = url.searchParams.get('google_calendar')
+    if (!oauthResult) return
+
+    setActiveView('calendar')
+    if (oauthResult === 'connected') {
+      setGoogleCalendarMessage('Google Calendar успешно подключён.')
+    } else if (oauthResult === 'cancelled') {
+      setGoogleCalendarError('Подключение Google Calendar отменено.')
+    } else {
+      setGoogleCalendarError('Не удалось подключить Google Calendar.')
+    }
+    url.searchParams.delete('google_calendar')
+    window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`)
   }, [session])
 
   function switchAuthMode(mode: AuthMode) {
@@ -914,6 +971,131 @@ function App() {
     return error instanceof Error ? error.message : 'Неизвестная ошибка.'
   }
 
+  async function loadGoogleCalendarStatus() {
+    if (!session || googleCalendarLoading) return
+    setGoogleCalendarLoading(true)
+    setGoogleCalendarError('')
+    const { data, error } = await supabase.functions.invoke(
+      'google-calendar-integration',
+      { body: { action: 'connection_status' } }
+    )
+    if (error) {
+      setGoogleCalendarError(await getEdgeFunctionErrorMessage(error))
+      setGoogleCalendarLoading(false)
+      return
+    }
+    setGoogleCalendarConnection(
+      data?.connected && data.connection
+        ? data.connection as GoogleCalendarConnection
+        : null
+    )
+    setGoogleCalendarLoading(false)
+  }
+
+  async function connectGoogleCalendar() {
+    if (!session || googleCalendarBusy) return
+    setGoogleCalendarBusy(true)
+    setGoogleCalendarError('')
+    setGoogleCalendarMessage('')
+    const returnUrl = new URL(window.location.href)
+    returnUrl.searchParams.delete('google_calendar')
+    const { data, error } = await supabase.functions.invoke(
+      'google-calendar-integration',
+      {
+        body: {
+          action: 'start_oauth',
+          return_to: returnUrl.toString(),
+        },
+      }
+    )
+    if (error || !data?.authorization_url) {
+      setGoogleCalendarError(
+        error
+          ? await getEdgeFunctionErrorMessage(error)
+          : 'Не удалось начать подключение Google Calendar.'
+      )
+      setGoogleCalendarBusy(false)
+      return
+    }
+    window.location.assign(String(data.authorization_url))
+  }
+
+  async function syncGoogleCalendar() {
+    if (!session || !activeGroup || googleCalendarBusy) return
+    setGoogleCalendarBusy(true)
+    setGoogleCalendarError('')
+    setGoogleCalendarMessage('')
+    setGoogleCalendarSyncResult(null)
+    const { data, error } = await supabase.functions.invoke(
+      'google-calendar-integration',
+      {
+        body: {
+          action: 'sync_group_calendar',
+          group_id: activeGroup.id,
+        },
+      }
+    )
+    if (error) {
+      setGoogleCalendarError(await getEdgeFunctionErrorMessage(error))
+      setGoogleCalendarBusy(false)
+      return
+    }
+    const result = data?.result as GoogleCalendarSyncResult
+    setGoogleCalendarSyncResult(result)
+    setGoogleCalendarConnection((connection) => connection
+      ? { ...connection, last_sync_at: result.synced_at }
+      : connection)
+    setGoogleCalendarMessage('Календарь синхронизирован.')
+    setGoogleCalendarBusy(false)
+  }
+
+  async function setGoogleCalendarAutoSync(enabled: boolean) {
+    if (!session || !googleCalendarConnection || googleCalendarBusy) return
+    setGoogleCalendarBusy(true)
+    setGoogleCalendarError('')
+    setGoogleCalendarMessage('')
+    const { data, error } = await supabase.functions.invoke(
+      'google-calendar-integration',
+      { body: { action: 'set_sync_enabled', sync_enabled: enabled } }
+    )
+    if (error) {
+      setGoogleCalendarError(await getEdgeFunctionErrorMessage(error))
+      setGoogleCalendarBusy(false)
+      return
+    }
+    setGoogleCalendarConnection(data.connection as GoogleCalendarConnection)
+    setGoogleCalendarMessage(
+      enabled
+        ? 'Автоматическая синхронизация включена.'
+        : 'Автоматическая синхронизация выключена.'
+    )
+    setGoogleCalendarBusy(false)
+  }
+
+  async function disconnectGoogleCalendar() {
+    if (!session || googleCalendarBusy) return
+    if (!window.confirm(
+      'Отключить Google Calendar? Уже созданные события останутся в вашем календаре.'
+    )) return
+
+    setGoogleCalendarBusy(true)
+    setGoogleCalendarError('')
+    setGoogleCalendarMessage('')
+    const { error } = await supabase.functions.invoke(
+      'google-calendar-integration',
+      { body: { action: 'disconnect' } }
+    )
+    if (error) {
+      setGoogleCalendarError(await getEdgeFunctionErrorMessage(error))
+      setGoogleCalendarBusy(false)
+      return
+    }
+    setGoogleCalendarConnection(null)
+    setGoogleCalendarSyncResult(null)
+    setGoogleCalendarMessage('Google Calendar отключён. Созданные события сохранены.')
+    setGoogleCalendarBusy(false)
+  }
+
   async function searchDiscoveryEvents() {
     const nowMilliseconds = Date.now()
     const actualSince = Math.floor(nowMilliseconds / 1000)
@@ -1271,6 +1453,7 @@ function App() {
     if (place.categories.length > 0) {
       noteParts.push(`Категории: ${place.categories.join(', ')}`)
     }
+    const venueLink = place.website?.trim() || normalizeInstagramUrl(place.instagram)
 
     const { data, error } = await supabase
       .from('plans')
@@ -1280,7 +1463,7 @@ function App() {
         type: kindLabels[place.kind],
         price: '',
         address: place.address ?? '',
-        link: place.source_url || place.website || '',
+        link: venueLink || null,
         note: noteParts.join('. '),
         tags,
         created_by: session.user.id,
@@ -1831,6 +2014,30 @@ function App() {
       return
     }
 
+    const linkedPlaceIds = [...new Set(
+      (plansData ?? [])
+        .map((plan) => plan.place_catalog_id ? String(plan.place_catalog_id) : '')
+        .filter(Boolean)
+    )]
+    const linkedPlaceUrls = new Map<string, string>()
+    if (linkedPlaceIds.length > 0) {
+      const { data: placeRows, error: placeLinksError } = await supabase
+        .from('place_catalog')
+        .select('id, website, instagram')
+        .in('id', linkedPlaceIds)
+
+      if (placeLinksError) {
+        console.error('Ошибка загрузки ссылок заведений:', placeLinksError)
+      } else {
+        for (const place of placeRows ?? []) {
+          linkedPlaceUrls.set(
+            String(place.id),
+            place.website?.trim() || normalizeInstagramUrl(place.instagram)
+          )
+        }
+      }
+    }
+
     const loadedPlans: Plan[] = (plansData ?? []).map((plan) => ({
       id: String(plan.id),
       event_catalog_id: plan.event_catalog_id
@@ -1843,7 +2050,9 @@ function App() {
       type: plan.type ?? 'Другое',
       price: plan.price ?? 'Цена не указана',
       address: plan.address ?? '',
-      link: plan.link ?? '',
+      link: plan.place_catalog_id
+        ? linkedPlaceUrls.get(String(plan.place_catalog_id)) ?? ''
+        : plan.link ?? '',
       note: plan.note ?? '',
       tags: Array.isArray(plan.tags) ? plan.tags : [],
       created_at: plan.created_at ?? undefined,
@@ -3178,6 +3387,99 @@ function App() {
 
         <h1 style={pageTitleStyle}>📅 Календарь</h1>
         <p style={pageDescriptionStyle}>Общие планы группы «{activeGroup.name}».</p>
+
+        <section style={googleCalendarCardStyle}>
+          <h2 style={googleCalendarTitleStyle}>Google Calendar</h2>
+          {googleCalendarLoading ? (
+            <div style={googleCalendarMutedStyle}>Проверяем подключение…</div>
+          ) : googleCalendarConnection?.status === 'needs_reauth' ? (
+            <>
+              <div style={googleCalendarReauthStyle}>
+                ⚠️ Нужно переподключить Google Calendar
+              </div>
+              <p style={googleCalendarMutedStyle}>
+                Google больше не принимает сохранённое подключение.
+              </p>
+              <button
+                type="button"
+                onClick={() => void connectGoogleCalendar()}
+                disabled={googleCalendarBusy}
+                style={{ ...mainButtonStyle, marginTop: 12 }}
+              >
+                {googleCalendarBusy ? 'Подключаю…' : 'Переподключить'}
+              </button>
+              <button
+                type="button"
+                onClick={() => void disconnectGoogleCalendar()}
+                disabled={googleCalendarBusy}
+                style={{ ...secondaryButtonStyle, marginTop: 9 }}
+              >
+                Отключить
+              </button>
+            </>
+          ) : googleCalendarConnection ? (
+            <>
+              <div style={googleCalendarConnectedStyle}>
+                ✅ Google Calendar подключён
+              </div>
+              {googleCalendarConnection.last_sync_at && (
+                <div style={googleCalendarMutedStyle}>
+                  Последняя синхронизация:{' '}
+                  {new Date(googleCalendarConnection.last_sync_at).toLocaleString('ru-RU')}
+                </div>
+              )}
+              <label style={googleCalendarToggleStyle}>
+                <input
+                  type="checkbox"
+                  checked={googleCalendarConnection.sync_enabled}
+                  onChange={(event) => void setGoogleCalendarAutoSync(event.target.checked)}
+                  disabled={googleCalendarBusy}
+                />
+                <span>Автоматически синхронизировать</span>
+              </label>
+              <button
+                type="button"
+                onClick={() => void syncGoogleCalendar()}
+                disabled={googleCalendarBusy}
+                style={{ ...mainButtonStyle, marginTop: 14 }}
+              >
+                {googleCalendarBusy ? 'Синхронизирую…' : 'Синхронизировать сейчас'}
+              </button>
+              <button
+                type="button"
+                onClick={() => void disconnectGoogleCalendar()}
+                disabled={googleCalendarBusy}
+                style={{ ...secondaryButtonStyle, marginTop: 9 }}
+              >
+                Отключить
+              </button>
+            </>
+          ) : (
+            <>
+              <p style={googleCalendarMutedStyle}>
+                Подключите личный календарь, чтобы вручную копировать в него события этой группы.
+              </p>
+              <button
+                type="button"
+                onClick={() => void connectGoogleCalendar()}
+                disabled={googleCalendarBusy}
+                style={{ ...mainButtonStyle, marginTop: 12 }}
+              >
+                {googleCalendarBusy ? 'Подключаю…' : 'Подключить Google Calendar'}
+              </button>
+            </>
+          )}
+          {googleCalendarSyncResult && (
+            <div style={googleCalendarResultStyle}>
+              Создано: {googleCalendarSyncResult.created} · Обновлено:{' '}
+              {googleCalendarSyncResult.updated} · Удалено: {googleCalendarSyncResult.deleted}
+            </div>
+          )}
+          {googleCalendarMessage && (
+            <div style={authSuccessStyle}>{googleCalendarMessage}</div>
+          )}
+          {googleCalendarError && <div style={authErrorStyle}>{googleCalendarError}</div>}
+        </section>
 
         <div style={calendarModeStyle}>
           {(['month', 'list'] as CalendarMode[]).map((mode) => (
@@ -5849,11 +6151,7 @@ function PlaceCard({
   const phoneHref = place.phone
     ? `tel:${place.phone.replace(/[^+\d]/g, '')}`
     : null
-  const instagramHref = place.instagram
-    ? place.instagram.startsWith('http')
-      ? place.instagram
-      : `https://www.instagram.com/${place.instagram.replace(/^@/, '')}`
-    : null
+  const instagramHref = normalizeInstagramUrl(place.instagram) || null
   const twitterHref = place.twitter
     ? place.twitter.startsWith('http')
       ? place.twitter
@@ -6715,6 +7013,53 @@ const calendarModeStyle = {
   gridTemplateColumns: '1fr 1fr',
   gap: 8,
   marginBottom: 20,
+}
+
+const googleCalendarCardStyle = {
+  marginBottom: 20,
+  padding: 16,
+  border: '1px solid #e5e5e5',
+  borderRadius: 16,
+  background: '#fafafa',
+}
+
+const googleCalendarTitleStyle = {
+  margin: '0 0 8px',
+  fontSize: 18,
+}
+
+const googleCalendarConnectedStyle = {
+  color: '#27613a',
+  fontWeight: 700,
+}
+
+const googleCalendarReauthStyle = {
+  color: '#8a5215',
+  fontWeight: 700,
+}
+
+const googleCalendarToggleStyle = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 9,
+  marginTop: 14,
+  color: '#333',
+  fontSize: 14,
+  cursor: 'pointer',
+}
+
+const googleCalendarMutedStyle = {
+  margin: '5px 0 0',
+  color: '#666',
+  fontSize: 14,
+  lineHeight: 1.45,
+}
+
+const googleCalendarResultStyle = {
+  marginTop: 12,
+  color: '#555',
+  fontSize: 13,
+  lineHeight: 1.4,
 }
 
 const calendarModeButtonStyle = {
