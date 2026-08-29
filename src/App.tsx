@@ -49,7 +49,7 @@ type RatingSummary = {
   count: number
 }
 
-type AppView = 'home' | 'ranking'
+type AppView = 'home' | 'ranking' | 'group' | 'profile'
 type AuthMode = 'login' | 'register'
 
 type Group = {
@@ -58,6 +58,21 @@ type Group = {
   created_by: string
   invite_code: string
   created_at?: string
+}
+
+type Profile = {
+  id: string
+  email: string
+  display_name: string
+  created_at?: string
+}
+
+type GroupMember = {
+  user_id: string
+  email: string
+  display_name: string
+  role: string
+  joined_at?: string
 }
 
 function App() {
@@ -80,6 +95,14 @@ function App() {
   const [workspaceBusy, setWorkspaceBusy] = useState(false)
   const [workspaceError, setWorkspaceError] = useState('')
   const [inviteCopied, setInviteCopied] = useState(false)
+  const [profile, setProfile] = useState<Profile | null>(null)
+  const [profileName, setProfileName] = useState('')
+  const [profileBusy, setProfileBusy] = useState(false)
+  const [profileError, setProfileError] = useState('')
+  const [profileMessage, setProfileMessage] = useState('')
+  const [groupMembers, setGroupMembers] = useState<GroupMember[]>([])
+  const [peopleLoading, setPeopleLoading] = useState(false)
+  const [peopleError, setPeopleError] = useState('')
 
   const [plans, setPlans] = useState<Plan[]>([])
   const [planEvents, setPlanEvents] = useState<PlanEvent[]>([])
@@ -169,6 +192,9 @@ function App() {
       setEventRatings([])
       setPlanDesireSummaries([])
       setEventRatingSummaries([])
+      setProfile(null)
+      setProfileName('')
+      setGroupMembers([])
       setSelectedPlan(null)
       setEditingPlan(null)
       setSchedulingPlan(null)
@@ -338,7 +364,11 @@ function App() {
 
     setActiveGroup(loadedGroup)
     setWorkspaceLoading(false)
-    await loadAppData(loadedGroup.id)
+    await Promise.all([
+      loadAppData(loadedGroup.id),
+      loadProfile(),
+      loadGroupMembers(loadedGroup.id),
+    ])
   }
 
   async function createWorkspace() {
@@ -418,7 +448,11 @@ function App() {
 
     setActiveGroup(createdGroup)
     setWorkspaceBusy(false)
-    await loadAppData(createdGroup.id)
+    await Promise.all([
+      loadAppData(createdGroup.id),
+      loadProfile(),
+      loadGroupMembers(createdGroup.id),
+    ])
   }
 
   async function joinWorkspace() {
@@ -484,7 +518,124 @@ function App() {
     setActiveGroup(joinedGroup)
     setJoinCode('')
     setWorkspaceBusy(false)
-    await loadAppData(joinedGroup.id)
+    await Promise.all([
+      loadAppData(joinedGroup.id),
+      loadProfile(),
+      loadGroupMembers(joinedGroup.id),
+    ])
+  }
+
+  async function loadProfile() {
+    if (!session) {
+      return
+    }
+
+    const { data, error } = await supabase
+      .from('profiles')
+      .select('id, email, display_name, created_at')
+      .eq('id', session.user.id)
+      .maybeSingle()
+
+    if (error) {
+      console.error('Ошибка загрузки профиля:', error)
+      setProfileError('Не удалось загрузить профиль.')
+      return
+    }
+
+    const loadedProfile: Profile = {
+      id: session.user.id,
+      email: data?.email ?? session.user.email ?? '',
+      display_name: data?.display_name?.trim() ?? '',
+      created_at: data?.created_at ?? undefined,
+    }
+
+    setProfile(loadedProfile)
+    setProfileName(loadedProfile.display_name)
+    setProfileError('')
+  }
+
+  async function loadGroupMembers(groupId: string) {
+    setPeopleLoading(true)
+    setPeopleError('')
+
+    const { data, error } = await supabase.rpc('get_group_members_with_profiles', {
+      requested_group_id: groupId,
+    })
+
+    if (error) {
+      console.error('Ошибка загрузки участников:', error)
+      setPeopleError('Не удалось загрузить участников группы.')
+      setPeopleLoading(false)
+      return
+    }
+
+    setGroupMembers(
+      (data ?? []).map((member: {
+        user_id: unknown
+        email: unknown
+        display_name: unknown
+        role: unknown
+        joined_at: unknown
+      }) => ({
+        user_id: String(member.user_id),
+        email: String(member.email ?? ''),
+        display_name: String(member.display_name ?? ''),
+        role: String(member.role ?? 'member'),
+        joined_at: member.joined_at ? String(member.joined_at) : undefined,
+      }))
+    )
+    setPeopleLoading(false)
+  }
+
+  async function saveProfile() {
+    if (!session) {
+      return
+    }
+
+    const displayName = profileName.trim()
+
+    setProfileBusy(true)
+    setProfileError('')
+    setProfileMessage('')
+
+    const { data, error } = await supabase
+      .from('profiles')
+      .upsert(
+        {
+          id: session.user.id,
+          email: session.user.email ?? profile?.email ?? '',
+          display_name: displayName || null,
+        },
+        { onConflict: 'id' }
+      )
+      .select('id, email, display_name, created_at')
+      .single()
+
+    if (error) {
+      console.error('Ошибка сохранения профиля:', error)
+      setProfileError('Не удалось сохранить имя.')
+      setProfileBusy(false)
+      return
+    }
+
+    const savedProfile: Profile = {
+      id: String(data.id),
+      email: data.email ?? session.user.email ?? '',
+      display_name: data.display_name?.trim() ?? '',
+      created_at: data.created_at ?? undefined,
+    }
+
+    setProfile(savedProfile)
+    setProfileName(savedProfile.display_name)
+    setGroupMembers((members) =>
+      members.map((member) =>
+        member.user_id === savedProfile.id
+          ? { ...member, display_name: savedProfile.display_name }
+          : member
+      )
+    )
+    setProfileMessage('Имя сохранено.')
+    setProfileBusy(false)
   }
 
   async function copyInviteCode() {
@@ -1579,6 +1730,148 @@ function App() {
     )
   }
 
+  const userEmail = profile?.email || session.user.email || 'Пользователь'
+  const userDisplayName = profile?.display_name || userEmail
+
+  if (activeView === 'profile') {
+    return (
+      <div style={pageContainerStyle}>
+        <UserBar
+          email={userEmail}
+          displayName={userDisplayName}
+          groupName={activeGroup.name}
+          busy={authBusy}
+          onOpenProfile={() => setActiveView('profile')}
+          onOpenGroup={() => setActiveView('group')}
+          onLogout={handleSignOut}
+        />
+
+        <h1 style={pageTitleStyle}>👤 Профиль</h1>
+        <p style={pageDescriptionStyle}>
+          Это имя увидят участники вашей группы.
+        </p>
+
+        <div style={contentCardStyle}>
+          <label style={fieldLabelStyle}>Имя</label>
+          <input
+            value={profileName}
+            onChange={(event) => {
+              setProfileName(event.target.value)
+              setProfileMessage('')
+            }}
+            placeholder={userEmail}
+            style={inputStyle}
+          />
+
+          <label style={fieldLabelStyle}>Email</label>
+          <input value={userEmail} readOnly style={readOnlyInputStyle} />
+
+          {profileError && <div style={authErrorStyle}>{profileError}</div>}
+          {profileMessage && <div style={authSuccessStyle}>{profileMessage}</div>}
+
+          <button
+            onClick={() => void saveProfile()}
+            disabled={profileBusy}
+            style={{
+              ...mainButtonStyle,
+              marginTop: 20,
+              opacity: profileBusy ? 0.6 : 1,
+            }}
+          >
+            {profileBusy ? 'Сохраняю…' : 'Сохранить'}
+          </button>
+        </div>
+
+        <BottomNavigation
+          activeView={activeView}
+          onNavigate={setActiveView}
+          onAdd={() => {
+            setActiveView('home')
+            setShowAddForm(true)
+          }}
+        />
+      </div>
+    )
+  }
+
+  if (activeView === 'group') {
+    return (
+      <div style={pageContainerStyle}>
+        <UserBar
+          email={userEmail}
+          displayName={userDisplayName}
+          groupName={activeGroup.name}
+          busy={authBusy}
+          onOpenProfile={() => setActiveView('profile')}
+          onOpenGroup={() => setActiveView('group')}
+          onLogout={handleSignOut}
+        />
+
+        <h1 style={pageTitleStyle}>👥 Группа</h1>
+        <p style={pageDescriptionStyle}>
+          Общее пространство для планов и оценок участников.
+        </p>
+
+        <div style={contentCardStyle}>
+          <InfoRow label="Название группы" value={activeGroup.name} />
+          <div style={{ paddingTop: 13 }}>
+            <div style={infoLabelStyle}>Код приглашения</div>
+            <div style={groupInviteRowStyle}>
+              <strong style={{ letterSpacing: '0.08em' }}>
+                {activeGroup.invite_code || 'Не задан'}
+              </strong>
+              {activeGroup.invite_code && (
+                <button
+                  onClick={() => void copyInviteCode()}
+                  style={copyInviteButtonStyle}
+                >
+                  {inviteCopied ? 'Скопировано ✓' : 'Скопировать'}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+
+        <h2 style={{ ...sectionTitleStyle, marginTop: 28 }}>
+          Участники — {groupMembers.length}
+        </h2>
+
+        {peopleLoading && <div style={emptyRankingStyle}>Загружаю участников…</div>}
+        {peopleError && <div style={authErrorStyle}>{peopleError}</div>}
+        {!peopleLoading && !peopleError && (
+          <div style={{ display: 'grid', gap: 10 }}>
+            {groupMembers.map((member) => {
+              const memberName = member.display_name.trim() || member.email
+
+              return (
+                <div key={member.user_id} style={memberCardStyle}>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={memberNameStyle}>{memberName}</div>
+                    {member.display_name.trim() && (
+                      <div style={memberEmailStyle}>{member.email}</div>
+                    )}
+                  </div>
+                  <div style={roleBadgeStyle}>
+                    {member.role === 'owner' ? 'Владелец' : 'Участник'}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        )}
+
+        <BottomNavigation
+          activeView={activeView}
+          onNavigate={setActiveView}
+          onAdd={() => {
+            setActiveView('home')
+            setShowAddForm(true)
+          }}
+        />
+      </div>
+    )
+  }
+
   if (activeView === 'ranking') {
     return (
       <div
@@ -1591,9 +1884,12 @@ function App() {
         }}
       >
         <UserBar
-          email={session.user.email ?? 'Пользователь'}
+          email={userEmail}
+          displayName={userDisplayName}
           groupName={activeGroup.name}
           busy={authBusy}
+          onOpenProfile={() => setActiveView('profile')}
+          onOpenGroup={() => setActiveView('group')}
           onLogout={handleSignOut}
         />
 
@@ -1848,9 +2144,12 @@ function App() {
       }}
     >
       <UserBar
-        email={session.user.email ?? 'Пользователь'}
+        email={userEmail}
+        displayName={userDisplayName}
         groupName={activeGroup.name}
         busy={authBusy}
+        onOpenProfile={() => setActiveView('profile')}
+        onOpenGroup={() => setActiveView('group')}
         onLogout={handleSignOut}
       />
 
@@ -2989,13 +3288,19 @@ function InviteStrip({
 
 function UserBar({
   email,
+  displayName,
   groupName,
   busy,
+  onOpenProfile,
+  onOpenGroup,
   onLogout,
 }: {
   email: string
+  displayName: string
   groupName: string
   busy: boolean
+  onOpenProfile: () => void
+  onOpenGroup: () => void
   onLogout: () => void | Promise<void>
 }) {
   return (
@@ -3005,11 +3310,20 @@ function UserBar({
           minWidth: 0,
         }}
       >
-        <div
+        <button
+          onClick={onOpenGroup}
           style={{
+            display: 'block',
+            width: '100%',
+            padding: 0,
+            border: 0,
+            background: 'transparent',
             color: '#222',
             fontSize: 14,
             fontWeight: 700,
+            textAlign: 'left',
+            cursor: 'pointer',
+            fontFamily: 'inherit',
             overflow: 'hidden',
             textOverflow: 'ellipsis',
             whiteSpace: 'nowrap',
@@ -3017,21 +3331,35 @@ function UserBar({
           title={groupName}
         >
           👥 {groupName}
-        </div>
+        </button>
 
-        <div
+        <button
+          onClick={onOpenProfile}
           style={{
+            display: 'block',
+            width: '100%',
+            padding: 0,
+            border: 0,
+            background: 'transparent',
             marginTop: 3,
             color: '#777',
             fontSize: 12,
+            textAlign: 'left',
+            cursor: 'pointer',
+            fontFamily: 'inherit',
             overflow: 'hidden',
             textOverflow: 'ellipsis',
             whiteSpace: 'nowrap',
           }}
-          title={email}
+          title={`${displayName} · ${email}`}
         >
-          👤 {email}
-        </div>
+          <span style={{ display: 'block', color: '#333', fontWeight: 600 }}>
+            👤 {displayName}
+          </span>
+          {displayName !== email && (
+            <span style={{ display: 'block', marginTop: 2 }}>{email}</span>
+          )}
+        </button>
       </div>
 
       <button
@@ -3043,6 +3371,42 @@ function UserBar({
         }}
       >
         Выйти
+      </button>
+    </div>
+  )
+}
+
+function BottomNavigation({
+  activeView,
+  onNavigate,
+  onAdd,
+}: {
+  activeView: AppView
+  onNavigate: (view: AppView) => void
+  onAdd: () => void
+}) {
+  return (
+    <div style={bottomNavStyle}>
+      <button
+        onClick={() => onNavigate('home')}
+        style={{
+          ...navButtonStyle,
+          fontWeight: activeView === 'home' ? 700 : 400,
+        }}
+      >
+        🏠 Главная
+      </button>
+      <button
+        onClick={() => onNavigate('ranking')}
+        style={{
+          ...navButtonStyle,
+          fontWeight: activeView === 'ranking' ? 700 : 400,
+        }}
+      >
+        🏆 Рейтинг
+      </button>
+      <button onClick={onAdd} style={navButtonStyle}>
+        ➕ Добавить
       </button>
     </div>
   )
@@ -3084,6 +3448,91 @@ const pageTitleStyle = {
   lineHeight: 1.15,
   fontWeight: 700,
   letterSpacing: '-0.02em',
+}
+
+const pageContainerStyle = {
+  maxWidth: 520,
+  margin: '0 auto',
+  padding: '28px 18px 96px',
+  fontFamily: 'Arial, sans-serif',
+  color: '#222',
+}
+
+const pageDescriptionStyle = {
+  marginTop: 0,
+  marginBottom: 24,
+  color: '#777',
+  fontSize: 16,
+  lineHeight: 1.5,
+}
+
+const contentCardStyle = {
+  padding: 18,
+  border: '1px solid #e5e5e5',
+  borderRadius: 16,
+  background: 'white',
+}
+
+const readOnlyInputStyle = {
+  width: '100%',
+  boxSizing: 'border-box' as const,
+  padding: '13px 14px',
+  marginTop: 8,
+  borderRadius: 10,
+  border: '1px solid #ddd',
+  fontSize: 16,
+  fontFamily: 'inherit',
+  background: '#f5f5f5',
+  color: '#666',
+}
+
+const infoLabelStyle = {
+  color: '#777',
+  fontSize: 13,
+  marginBottom: 8,
+}
+
+const groupInviteRowStyle = {
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'space-between',
+  gap: 12,
+}
+
+const memberCardStyle = {
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'space-between',
+  gap: 12,
+  padding: 15,
+  border: '1px solid #e5e5e5',
+  borderRadius: 14,
+  background: 'white',
+}
+
+const memberNameStyle = {
+  fontSize: 15,
+  fontWeight: 700,
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+}
+
+const memberEmailStyle = {
+  marginTop: 4,
+  color: '#777',
+  fontSize: 13,
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+}
+
+const roleBadgeStyle = {
+  flexShrink: 0,
+  padding: '5px 8px',
+  borderRadius: 999,
+  background: '#f2f2f2',
+  color: '#555',
+  fontSize: 12,
+  fontWeight: 600,
 }
 
 const sectionTitleStyle = {
