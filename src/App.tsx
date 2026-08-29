@@ -86,6 +86,7 @@ function App() {
   const [authMessage, setAuthMessage] = useState('')
 
   const [activeGroup, setActiveGroup] = useState<Group | null>(null)
+  const [activeGroupRole, setActiveGroupRole] = useState('member')
   const [workspaceLoading, setWorkspaceLoading] = useState(false)
   const [workspaceName, setWorkspaceName] = useState('Наши планы')
   const [joinCode, setJoinCode] = useState(() => {
@@ -103,6 +104,10 @@ function App() {
   const [groupMembers, setGroupMembers] = useState<GroupMember[]>([])
   const [peopleLoading, setPeopleLoading] = useState(false)
   const [peopleError, setPeopleError] = useState('')
+  const [editingGroupName, setEditingGroupName] = useState(false)
+  const [groupNameDraft, setGroupNameDraft] = useState('')
+  const [groupNameBusy, setGroupNameBusy] = useState(false)
+  const [groupNameError, setGroupNameError] = useState('')
 
   const [plans, setPlans] = useState<Plan[]>([])
   const [planEvents, setPlanEvents] = useState<PlanEvent[]>([])
@@ -185,6 +190,7 @@ function App() {
   useEffect(() => {
     if (!session) {
       setActiveGroup(null)
+      setActiveGroupRole('member')
       setWorkspaceLoading(false)
       setPlans([])
       setPlanEvents([])
@@ -301,6 +307,7 @@ function App() {
     setAuthPassword('')
     setAuthMode('login')
     setActiveGroup(null)
+    setActiveGroupRole('member')
     setWorkspaceName('Наши планы')
     setJoinCode('')
     setWorkspaceError('')
@@ -363,6 +370,7 @@ function App() {
     }
 
     setActiveGroup(loadedGroup)
+    setActiveGroupRole(String(membership.role ?? 'member'))
     setWorkspaceLoading(false)
     await Promise.all([
       loadAppData(loadedGroup.id),
@@ -447,6 +455,7 @@ function App() {
     }
 
     setActiveGroup(createdGroup)
+    setActiveGroupRole('owner')
     setWorkspaceBusy(false)
     await Promise.all([
       loadAppData(createdGroup.id),
@@ -584,7 +593,71 @@ function App() {
         joined_at: member.joined_at ? String(member.joined_at) : undefined,
       }))
     )
+    const currentMember = (data ?? []).find(
+      (member: { user_id: unknown }) => String(member.user_id) === session?.user.id
+    ) as { role?: unknown } | undefined
+
+    if (currentMember) {
+      setActiveGroupRole(String(currentMember.role ?? 'member'))
+    }
     setPeopleLoading(false)
+  }
+
+  function startEditingGroupName() {
+    if (!activeGroup || activeGroupRole !== 'owner') {
+      return
+    }
+
+    setGroupNameDraft(activeGroup.name)
+    setGroupNameError('')
+    setEditingGroupName(true)
+  }
+
+  function cancelEditingGroupName() {
+    if (groupNameBusy) {
+      return
+    }
+
+    setGroupNameDraft('')
+    setGroupNameError('')
+    setEditingGroupName(false)
+  }
+
+  async function saveGroupName() {
+    if (!activeGroup || !session || activeGroupRole !== 'owner') {
+      return
+    }
+
+    const name = groupNameDraft.trim()
+
+    if (!name) {
+      setGroupNameError('Название группы не может быть пустым.')
+      return
+    }
+
+    setGroupNameBusy(true)
+    setGroupNameError('')
+
+    const { data, error } = await supabase
+      .from('groups')
+      .update({ name })
+      .eq('id', activeGroup.id)
+      .eq('created_by', session.user.id)
+      .select('name')
+      .single()
+
+    if (error) {
+      console.error('Ошибка изменения названия группы:', error)
+      setGroupNameError('Не удалось изменить название группы. Попробуйте ещё раз.')
+      setGroupNameBusy(false)
+      return
+    }
+
+    const savedName = data.name?.trim() || name
+    setActiveGroup((group) => (group ? { ...group, name: savedName } : group))
+    setGroupNameDraft('')
+    setEditingGroupName(false)
+    setGroupNameBusy(false)
   }
 
   async function saveProfile() {
@@ -1813,7 +1886,68 @@ function App() {
         </p>
 
         <div style={contentCardStyle}>
-          <InfoRow label="Название группы" value={activeGroup.name} />
+          <div style={groupNameSectionStyle}>
+            <div style={infoLabelStyle}>Название группы</div>
+
+            {editingGroupName ? (
+              <>
+                <input
+                  value={groupNameDraft}
+                  onChange={(event) => {
+                    setGroupNameDraft(event.target.value)
+                    setGroupNameError('')
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' && !groupNameBusy) {
+                      void saveGroupName()
+                    }
+                  }}
+                  disabled={groupNameBusy}
+                  autoFocus
+                  style={inputStyle}
+                />
+
+                {groupNameError && (
+                  <div style={inlineErrorStyle}>{groupNameError}</div>
+                )}
+
+                <div style={groupNameActionsStyle}>
+                  <button
+                    onClick={() => void saveGroupName()}
+                    disabled={groupNameBusy}
+                    style={{
+                      ...smallPrimaryButtonStyle,
+                      opacity: groupNameBusy ? 0.6 : 1,
+                    }}
+                  >
+                    {groupNameBusy ? 'Сохраняю…' : 'Сохранить'}
+                  </button>
+                  <button
+                    onClick={cancelEditingGroupName}
+                    disabled={groupNameBusy}
+                    style={{
+                      ...copyInviteButtonStyle,
+                      opacity: groupNameBusy ? 0.6 : 1,
+                    }}
+                  >
+                    Отмена
+                  </button>
+                </div>
+              </>
+            ) : (
+              <div style={groupNameRowStyle}>
+                <strong>{activeGroup.name}</strong>
+                {activeGroupRole === 'owner' && (
+                  <button
+                    onClick={startEditingGroupName}
+                    style={copyInviteButtonStyle}
+                  >
+                    ✏️ Изменить
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
           <div style={{ paddingTop: 13 }}>
             <div style={infoLabelStyle}>Код приглашения</div>
             <div style={groupInviteRowStyle}>
@@ -3497,6 +3631,43 @@ const groupInviteRowStyle = {
   alignItems: 'center',
   justifyContent: 'space-between',
   gap: 12,
+}
+
+const groupNameSectionStyle = {
+  paddingBottom: 13,
+  borderBottom: '1px solid #eee',
+}
+
+const groupNameRowStyle = {
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'space-between',
+  gap: 12,
+}
+
+const groupNameActionsStyle = {
+  display: 'flex',
+  gap: 8,
+  marginTop: 12,
+}
+
+const smallPrimaryButtonStyle = {
+  padding: '8px 12px',
+  border: 0,
+  borderRadius: 9,
+  background: '#222',
+  color: 'white',
+  fontSize: 13,
+  fontWeight: 600,
+  cursor: 'pointer',
+  fontFamily: 'inherit',
+}
+
+const inlineErrorStyle = {
+  marginTop: 9,
+  color: '#9b1c1c',
+  fontSize: 13,
+  lineHeight: 1.4,
 }
 
 const memberCardStyle = {
