@@ -4,6 +4,7 @@ import { supabase } from './lib/supabase'
 
 type Plan = {
   id: string
+  event_catalog_id?: string | null
   title: string
   type: string
   price: string
@@ -49,7 +50,13 @@ type RatingSummary = {
   count: number
 }
 
-type AppView = 'home' | 'ranking' | 'discovery' | 'group' | 'profile'
+type AppView =
+  | 'home'
+  | 'recommendations'
+  | 'ranking'
+  | 'discovery'
+  | 'group'
+  | 'profile'
 type AuthMode = 'login' | 'register'
 
 type Group = {
@@ -75,35 +82,8 @@ type GroupMember = {
   joined_at?: string
 }
 
-type GroupIntegration = {
-  id: string
-  group_id: string
-  provider: 'google_sheets'
-  spreadsheet_id: string
-  sheet_name: string
-  created_by: string
-  created_at?: string
-  updated_at?: string
-}
-
-type GoogleSheetValidation = {
-  status: 'passed' | 'warning' | 'failed'
-  valid: boolean
-  missingHeaders: string[]
-  warnings: string[]
-  technicalColumnMissing: boolean
-}
-
-type GoogleSheetCheckResult = {
-  serviceAccountEmail: string
-  spreadsheetId: string
-  spreadsheetTitle: string
-  sheetName: string
-  headers: string[]
-  validation: GoogleSheetValidation
-}
-
 type DiscoveryEvent = {
+  catalog_id: string
   source: 'kudago'
   source_id: string
   title: string
@@ -118,6 +98,24 @@ type DiscoveryEvent = {
   source_url: string
   categories: string[]
   age_restriction: string
+}
+
+type RecommendationEvent = DiscoveryEvent & {
+  recommendation_score: number
+  reasons: string[]
+  reaction: EventReaction | null
+  is_in_plans: boolean
+}
+
+type EventReaction = 'interested' | 'not_interested' | 'wishlist'
+type OnboardingStep = 'preferences' | 'calibration' | 'complete' | null
+
+type UserPreferences = {
+  user_id: string
+  preference_text: string
+  city: string
+  onboarding_completed: boolean
+  calibration_completed_at?: string | null
 }
 
 const DISCOVERY_LOCATIONS = [
@@ -164,22 +162,45 @@ function App() {
   const [groupNameDraft, setGroupNameDraft] = useState('')
   const [groupNameBusy, setGroupNameBusy] = useState(false)
   const [groupNameError, setGroupNameError] = useState('')
-  const [googleSheetIntegration, setGoogleSheetIntegration] =
-    useState<GroupIntegration | null>(null)
-  const [googleSheetLoading, setGoogleSheetLoading] = useState(false)
-  const [googleSheetBusy, setGoogleSheetBusy] = useState(false)
-  const [googleSheetFormOpen, setGoogleSheetFormOpen] = useState(false)
-  const [googleSheetUrl, setGoogleSheetUrl] = useState('')
-  const [googleServiceAccountEmail, setGoogleServiceAccountEmail] = useState('')
-  const [googleSheetCheck, setGoogleSheetCheck] =
-    useState<GoogleSheetCheckResult | null>(null)
-  const [googleSheetError, setGoogleSheetError] = useState('')
   const [discoveryLocation, setDiscoveryLocation] = useState('msk')
   const [discoveryPeriod, setDiscoveryPeriod] = useState(7)
   const [discoveryEvents, setDiscoveryEvents] = useState<DiscoveryEvent[]>([])
   const [discoveryLoading, setDiscoveryLoading] = useState(false)
   const [discoverySearched, setDiscoverySearched] = useState(false)
   const [discoveryError, setDiscoveryError] = useState('')
+  const [discoveryFeedback, setDiscoveryFeedback] = useState<
+    Record<string, EventReaction>
+  >({})
+  const [discoveryFeedbackBusy, setDiscoveryFeedbackBusy] = useState('')
+  const [discoveryFeedbackError, setDiscoveryFeedbackError] = useState('')
+  const [showHiddenDiscoveryEvents, setShowHiddenDiscoveryEvents] =
+    useState(false)
+  const [discoveryPlanBusy, setDiscoveryPlanBusy] = useState('')
+  const [discoveryPlanMessage, setDiscoveryPlanMessage] = useState('')
+  const [discoveryPlanError, setDiscoveryPlanError] = useState('')
+  const [userPreferences, setUserPreferences] =
+    useState<UserPreferences | null>(null)
+  const [preferencesLoading, setPreferencesLoading] = useState(true)
+  const [preferencesBusy, setPreferencesBusy] = useState(false)
+  const [preferencesError, setPreferencesError] = useState('')
+  const [preferencesEditing, setPreferencesEditing] = useState(false)
+  const [preferencesMessage, setPreferencesMessage] = useState('')
+  const [preferenceTextDraft, setPreferenceTextDraft] = useState('')
+  const [preferenceCityDraft, setPreferenceCityDraft] = useState('msk')
+  const [onboardingStep, setOnboardingStep] = useState<OnboardingStep>(null)
+  const [calibrationEvents, setCalibrationEvents] = useState<DiscoveryEvent[]>([])
+  const [calibrationIndex, setCalibrationIndex] = useState(0)
+  const [calibrationLoading, setCalibrationLoading] = useState(false)
+  const [calibrationBusy, setCalibrationBusy] = useState(false)
+  const [calibrationError, setCalibrationError] = useState('')
+  const [recommendations, setRecommendations] =
+    useState<RecommendationEvent[]>([])
+  const [recommendationsLoading, setRecommendationsLoading] = useState(false)
+  const [recommendationsSearched, setRecommendationsSearched] = useState(false)
+  const [recommendationsError, setRecommendationsError] = useState('')
+  const [recommendationsOffset, setRecommendationsOffset] = useState(0)
+  const [recommendationsFeedbackCount, setRecommendationsFeedbackCount] =
+    useState(0)
 
   const [plans, setPlans] = useState<Plan[]>([])
   const [planEvents, setPlanEvents] = useState<PlanEvent[]>([])
@@ -273,10 +294,15 @@ function App() {
       setProfile(null)
       setProfileName('')
       setGroupMembers([])
-      setGoogleSheetIntegration(null)
-      setGoogleSheetFormOpen(false)
-      setGoogleSheetCheck(null)
-      setGoogleSheetError('')
+      setUserPreferences(null)
+      setPreferencesLoading(false)
+      setOnboardingStep(null)
+      setCalibrationEvents([])
+      setCalibrationIndex(0)
+      setRecommendations([])
+      setRecommendationsSearched(false)
+      setRecommendationsOffset(0)
+      setRecommendationsFeedbackCount(0)
       setSelectedPlan(null)
       setEditingPlan(null)
       setSchedulingPlan(null)
@@ -388,6 +414,7 @@ function App() {
     setJoinCode('')
     setWorkspaceError('')
     setInviteCopied(false)
+    setShowHiddenDiscoveryEvents(false)
     setAuthBusy(false)
   }
 
@@ -452,7 +479,7 @@ function App() {
       loadAppData(loadedGroup.id),
       loadProfile(),
       loadGroupMembers(loadedGroup.id),
-      loadGoogleSheetIntegration(loadedGroup.id),
+      loadUserPreferences(),
     ])
   }
 
@@ -538,7 +565,7 @@ function App() {
       loadAppData(createdGroup.id),
       loadProfile(),
       loadGroupMembers(createdGroup.id),
-      loadGoogleSheetIntegration(createdGroup.id),
+      loadUserPreferences(),
     ])
   }
 
@@ -609,7 +636,7 @@ function App() {
       loadAppData(joinedGroup.id),
       loadProfile(),
       loadGroupMembers(joinedGroup.id),
-      loadGoogleSheetIntegration(joinedGroup.id),
+      loadUserPreferences(),
     ])
   }
 
@@ -739,41 +766,6 @@ function App() {
     setGroupNameBusy(false)
   }
 
-  async function loadGoogleSheetIntegration(groupId: string) {
-    setGoogleSheetLoading(true)
-
-    const { data, error } = await supabase
-      .from('group_integrations')
-      .select('*')
-      .eq('group_id', groupId)
-      .eq('provider', 'google_sheets')
-      .maybeSingle()
-
-    if (error) {
-      console.error('Ошибка загрузки интеграции Google Sheets:', error)
-      setGoogleSheetError('Не удалось загрузить подключение Google Таблицы.')
-      setGoogleSheetLoading(false)
-      return
-    }
-
-    setGoogleSheetIntegration(
-      data
-        ? {
-            id: String(data.id),
-            group_id: String(data.group_id),
-            provider: 'google_sheets',
-            spreadsheet_id: String(data.spreadsheet_id),
-            sheet_name: String(data.sheet_name ?? ''),
-            created_by: String(data.created_by),
-            created_at: data.created_at ?? undefined,
-            updated_at: data.updated_at ?? undefined,
-          }
-        : null
-    )
-    setGoogleSheetError('')
-    setGoogleSheetLoading(false)
-  }
-
   async function getEdgeFunctionErrorMessage(error: unknown) {
     if (
       typeof error === 'object' &&
@@ -794,189 +786,6 @@ function App() {
     return error instanceof Error ? error.message : 'Неизвестная ошибка.'
   }
 
-  async function loadGoogleServiceAccountEmail() {
-    if (!activeGroup || activeGroupRole !== 'owner') {
-      return
-    }
-
-    const { data, error } = await supabase.functions.invoke(
-      'google-sheets-integration',
-      {
-        body: {
-          action: 'service_account_info',
-          group_id: activeGroup.id,
-        },
-      }
-    )
-
-    if (error) {
-      setGoogleSheetError(await getEdgeFunctionErrorMessage(error))
-      return
-    }
-
-    setGoogleServiceAccountEmail(String(data.serviceAccountEmail ?? ''))
-  }
-
-  async function openGoogleSheetForm() {
-    if (!activeGroup || activeGroupRole !== 'owner') {
-      return
-    }
-
-    setGoogleSheetFormOpen(true)
-    setGoogleSheetCheck(null)
-    setGoogleSheetError('')
-    setGoogleSheetUrl(
-      googleSheetIntegration
-        ? `https://docs.google.com/spreadsheets/d/${googleSheetIntegration.spreadsheet_id}/edit`
-        : ''
-    )
-
-    if (!googleServiceAccountEmail) {
-      await loadGoogleServiceAccountEmail()
-    }
-  }
-
-  function closeGoogleSheetForm() {
-    if (googleSheetBusy) {
-      return
-    }
-
-    setGoogleSheetFormOpen(false)
-    setGoogleSheetCheck(null)
-    setGoogleSheetError('')
-  }
-
-  async function checkGoogleSheet(urlOverride?: string) {
-    if (!activeGroup || activeGroupRole !== 'owner') {
-      return
-    }
-
-    const spreadsheetUrl = (urlOverride ?? googleSheetUrl).trim()
-
-    if (!spreadsheetUrl) {
-      setGoogleSheetError('Вставьте ссылку на Google Таблицу.')
-      return
-    }
-
-    setGoogleSheetBusy(true)
-    setGoogleSheetError('')
-    setGoogleSheetCheck(null)
-
-    const { data, error } = await supabase.functions.invoke(
-      'google-sheets-integration',
-      {
-        body: {
-          action: 'validate',
-          group_id: activeGroup.id,
-          spreadsheet_url: spreadsheetUrl,
-        },
-      }
-    )
-
-    if (error) {
-      setGoogleSheetError(await getEdgeFunctionErrorMessage(error))
-      setGoogleSheetBusy(false)
-      return
-    }
-
-    const result = data as GoogleSheetCheckResult
-    setGoogleServiceAccountEmail(result.serviceAccountEmail)
-    setGoogleSheetCheck(result)
-    setGoogleSheetBusy(false)
-  }
-
-  async function saveGoogleSheetIntegration() {
-    if (
-      !activeGroup ||
-      !session ||
-      activeGroupRole !== 'owner' ||
-      !googleSheetCheck?.validation.valid
-    ) {
-      return
-    }
-
-    setGoogleSheetBusy(true)
-    setGoogleSheetError('')
-
-    const integrationValues = {
-      group_id: activeGroup.id,
-      provider: 'google_sheets',
-      spreadsheet_id: googleSheetCheck.spreadsheetId,
-      sheet_name: googleSheetCheck.sheetName,
-    }
-    const query = googleSheetIntegration
-      ? supabase
-          .from('group_integrations')
-          .update(integrationValues)
-          .eq('id', googleSheetIntegration.id)
-      : supabase
-          .from('group_integrations')
-          .insert({
-            ...integrationValues,
-            created_by: session.user.id,
-          })
-    const { data, error } = await query.select().single()
-
-    if (error) {
-      console.error('Ошибка сохранения интеграции Google Sheets:', error)
-      setGoogleSheetError('Не удалось сохранить подключение Google Таблицы.')
-      setGoogleSheetBusy(false)
-      return
-    }
-
-    setGoogleSheetIntegration({
-      id: String(data.id),
-      group_id: String(data.group_id),
-      provider: 'google_sheets',
-      spreadsheet_id: String(data.spreadsheet_id),
-      sheet_name: String(data.sheet_name ?? ''),
-      created_by: String(data.created_by),
-      created_at: data.created_at ?? undefined,
-      updated_at: data.updated_at ?? undefined,
-    })
-    setGoogleSheetFormOpen(false)
-    setGoogleSheetCheck(null)
-    setGoogleSheetBusy(false)
-  }
-
-  async function disconnectGoogleSheet() {
-    if (
-      !activeGroup ||
-      activeGroupRole !== 'owner' ||
-      !googleSheetIntegration
-    ) {
-      return
-    }
-
-    const confirmed = window.confirm('Отключить Google Таблицу от этой группы?')
-
-    if (!confirmed) {
-      return
-    }
-
-    setGoogleSheetBusy(true)
-    setGoogleSheetError('')
-
-    const { error } = await supabase
-      .from('group_integrations')
-      .delete()
-      .eq('id', googleSheetIntegration.id)
-      .eq('group_id', activeGroup.id)
-
-    if (error) {
-      console.error('Ошибка отключения Google Sheets:', error)
-      setGoogleSheetError('Не удалось отключить Google Таблицу.')
-      setGoogleSheetBusy(false)
-      return
-    }
-
-    setGoogleSheetIntegration(null)
-    setGoogleSheetFormOpen(false)
-    setGoogleSheetCheck(null)
-    setGoogleSheetUrl('')
-    setGoogleSheetBusy(false)
-  }
-
   async function searchDiscoveryEvents() {
     const nowMilliseconds = Date.now()
     const actualSince = Math.floor(nowMilliseconds / 1000)
@@ -993,6 +802,9 @@ function App() {
     setDiscoveryLoading(true)
     setDiscoverySearched(true)
     setDiscoveryError('')
+    setDiscoveryFeedbackError('')
+    setDiscoveryPlanMessage('')
+    setDiscoveryPlanError('')
 
     const { data, error } = await supabase.functions.invoke('event-discovery', {
       body: {
@@ -1011,10 +823,524 @@ function App() {
       return
     }
 
-    setDiscoveryEvents(
-      Array.isArray(data?.events) ? data.events as DiscoveryEvent[] : []
-    )
+    const events = Array.isArray(data?.events)
+      ? data.events as DiscoveryEvent[]
+      : []
+    setDiscoveryEvents(events)
+    await loadDiscoveryFeedback(events)
     setDiscoveryLoading(false)
+  }
+
+  async function loadDiscoveryFeedback(events: DiscoveryEvent[]) {
+    if (!session || events.length === 0) {
+      setDiscoveryFeedback({})
+      return
+    }
+
+    const eventIds = [...new Set(events.map((event) => event.catalog_id))]
+    const { data, error } = await supabase
+      .from('event_feedback')
+      .select('event_id, reaction')
+      .eq('user_id', session.user.id)
+      .in('event_id', eventIds)
+
+    if (error) {
+      console.error('Ошибка загрузки реакций на мероприятия:', error)
+      setDiscoveryFeedback({})
+      setDiscoveryFeedbackError('Не удалось загрузить сохранённые реакции.')
+      return
+    }
+
+    const feedback: Record<string, EventReaction> = {}
+
+    for (const row of data ?? []) {
+      if (
+        row.reaction === 'interested' ||
+        row.reaction === 'not_interested' ||
+        row.reaction === 'wishlist'
+      ) {
+        feedback[String(row.event_id)] = row.reaction
+      }
+    }
+
+    setDiscoveryFeedback(feedback)
+  }
+
+  async function loadPersonalizedRecommendations(offset: number) {
+    if (!session || recommendationsLoading) return
+
+    setRecommendationsLoading(true)
+    setRecommendationsSearched(true)
+    setRecommendationsError('')
+    setDiscoveryFeedbackError('')
+    setDiscoveryPlanError('')
+    setDiscoveryPlanMessage('')
+
+    const { data, error } = await supabase.functions.invoke('event-discovery', {
+      body: {
+        action: 'personalized_recommendations',
+        limit: 10,
+        offset,
+      },
+    })
+
+    if (error) {
+      setRecommendations([])
+      setRecommendationsError(await getEdgeFunctionErrorMessage(error))
+      setRecommendationsLoading(false)
+      return
+    }
+
+    if (data?.onboarding_required) {
+      setRecommendations([])
+      setRecommendationsLoading(false)
+      return
+    }
+
+    const events = Array.isArray(data?.recommendations)
+      ? data.recommendations as RecommendationEvent[]
+      : []
+    setRecommendations(events)
+    setRecommendationsFeedbackCount(Number(data?.feedback_count) || 0)
+    setRecommendationsOffset(offset + 10)
+    setDiscoveryFeedback((current) => {
+      const next = { ...current }
+      for (const event of events) {
+        if (
+          event.reaction === 'interested' ||
+          event.reaction === 'not_interested' ||
+          event.reaction === 'wishlist'
+        ) {
+          next[event.catalog_id] = event.reaction
+        } else {
+          delete next[event.catalog_id]
+        }
+      }
+      return next
+    })
+    setRecommendationsLoading(false)
+  }
+
+  function navigateTo(view: AppView) {
+    setActiveView(view)
+
+    if (
+      view === 'recommendations' &&
+      userPreferences?.onboarding_completed &&
+      !recommendationsSearched &&
+      !recommendationsLoading
+    ) {
+      void loadPersonalizedRecommendations(0)
+    }
+  }
+
+  async function toggleDiscoveryReaction(
+    eventId: string,
+    reaction: EventReaction
+  ) {
+    if (!session || discoveryFeedbackBusy) {
+      return
+    }
+
+    setDiscoveryFeedbackBusy(eventId)
+    setDiscoveryFeedbackError('')
+    const currentReaction = discoveryFeedback[eventId]
+
+    if (currentReaction === reaction) {
+      setDiscoveryFeedback((current) => {
+        const next = { ...current }
+        delete next[eventId]
+        return next
+      })
+
+      const { error } = await supabase
+        .from('event_feedback')
+        .delete()
+        .eq('user_id', session.user.id)
+        .eq('event_id', eventId)
+
+      if (error) {
+        console.error('Ошибка удаления реакции:', error)
+        setDiscoveryFeedbackError('Не удалось снять реакцию.')
+        setDiscoveryFeedback((current) => ({
+          ...current,
+          [eventId]: currentReaction,
+        }))
+        setDiscoveryFeedbackBusy('')
+        return
+      }
+
+      setDiscoveryFeedbackBusy('')
+      return
+    }
+
+    setDiscoveryFeedback((current) => ({
+      ...current,
+      [eventId]: reaction,
+    }))
+
+    const { error } = await supabase
+      .from('event_feedback')
+      .upsert(
+        {
+          user_id: session.user.id,
+          event_id: eventId,
+          reaction,
+        },
+        { onConflict: 'user_id,event_id' }
+      )
+
+    if (error) {
+      console.error('Ошибка сохранения реакции:', error)
+      setDiscoveryFeedbackError('Не удалось сохранить реакцию.')
+      setDiscoveryFeedback((current) => {
+        const next = { ...current }
+        if (currentReaction) {
+          next[eventId] = currentReaction
+        } else {
+          delete next[eventId]
+        }
+        return next
+      })
+      setDiscoveryFeedbackBusy('')
+      return
+    }
+
+    setDiscoveryFeedbackBusy('')
+  }
+
+  async function addDiscoveryEventToPlans(event: DiscoveryEvent) {
+    if (!session || !activeGroup || discoveryPlanBusy) {
+      return
+    }
+
+    setDiscoveryPlanBusy(event.catalog_id)
+    setDiscoveryPlanMessage('')
+    setDiscoveryPlanError('')
+
+    const { data: existingPlan, error: checkError } = await supabase
+      .from('plans')
+      .select('id')
+      .eq('group_id', activeGroup.id)
+      .eq('event_catalog_id', event.catalog_id)
+      .maybeSingle()
+
+    if (checkError) {
+      console.error('Ошибка проверки мероприятия в планах:', checkError)
+      setDiscoveryPlanError('Не удалось проверить список планов.')
+      setDiscoveryPlanBusy('')
+      return
+    }
+
+    if (existingPlan) {
+      await loadAppData(activeGroup.id)
+      setDiscoveryPlanError('Это мероприятие уже добавлено в планы.')
+      setDiscoveryPlanBusy('')
+      return
+    }
+
+    const normalizedDescription = event.description
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 500)
+    const { data, error } = await supabase
+      .from('plans')
+      .insert({
+        event_catalog_id: event.catalog_id,
+        title: event.title,
+        type: event.categories[0] || 'Другое',
+        price: event.price,
+        address: event.address,
+        link: event.source_url,
+        note: normalizedDescription,
+        tags: event.categories,
+        created_by: session.user.id,
+        group_id: activeGroup.id,
+      })
+      .select()
+      .single()
+
+    if (error) {
+      if (error.code === '23505') {
+        await loadAppData(activeGroup.id)
+        setDiscoveryPlanError('Это мероприятие уже добавлено в планы.')
+      } else {
+        console.error('Ошибка добавления мероприятия в планы:', error)
+        setDiscoveryPlanError('Не удалось добавить мероприятие в планы.')
+      }
+
+      setDiscoveryPlanBusy('')
+      return
+    }
+
+    const addedPlan: Plan = {
+      id: String(data.id),
+      event_catalog_id: String(data.event_catalog_id),
+      title: data.title ?? '',
+      type: data.type ?? 'Другое',
+      price: data.price ?? '',
+      address: data.address ?? '',
+      link: data.link ?? '',
+      note: data.note ?? '',
+      tags: Array.isArray(data.tags) ? data.tags : [],
+      created_at: data.created_at ?? undefined,
+    }
+
+    setPlans((currentPlans) => [addedPlan, ...currentPlans])
+    setDiscoveryPlanMessage('Добавлено в Мои планы.')
+    setDiscoveryPlanBusy('')
+  }
+
+  async function loadUserPreferences() {
+    if (!session) return
+
+    setPreferencesLoading(true)
+    const { data, error } = await supabase
+      .from('user_preferences')
+      .select('*')
+      .eq('user_id', session.user.id)
+      .maybeSingle()
+
+    if (error) {
+      console.error('Ошибка загрузки предпочтений:', error)
+      setPreferencesError('Не удалось загрузить профиль вкусов.')
+      setPreferencesLoading(false)
+      return
+    }
+
+    const preferences: UserPreferences = data
+      ? {
+          user_id: String(data.user_id),
+          preference_text: data.preference_text ?? '',
+          city: data.city ?? 'msk',
+          onboarding_completed: data.onboarding_completed === true,
+          calibration_completed_at: data.calibration_completed_at ?? null,
+        }
+      : {
+          user_id: session.user.id,
+          preference_text: '',
+          city: 'msk',
+          onboarding_completed: false,
+          calibration_completed_at: null,
+        }
+
+    setUserPreferences(preferences)
+    setPreferenceTextDraft(preferences.preference_text)
+    setPreferenceCityDraft(preferences.city)
+    setPreferencesError('')
+    setPreferencesLoading(false)
+
+    if (!preferences.onboarding_completed) {
+      setOnboardingStep('preferences')
+    }
+  }
+
+  async function saveUserPreferences(beginCalibration: boolean) {
+    if (!session) return
+
+    const preferenceText = preferenceTextDraft.trim()
+
+    if (!preferenceText) {
+      setPreferencesError('Расскажите хотя бы немного о своих предпочтениях.')
+      return
+    }
+
+    setPreferencesBusy(true)
+    setPreferencesError('')
+    setPreferencesMessage('')
+    const { data, error } = await supabase
+      .from('user_preferences')
+      .upsert(
+        {
+          user_id: session.user.id,
+          preference_text: preferenceText,
+          city: preferenceCityDraft,
+          onboarding_completed: userPreferences?.onboarding_completed ?? false,
+          calibration_completed_at:
+            userPreferences?.calibration_completed_at ?? null,
+        },
+        { onConflict: 'user_id' }
+      )
+      .select('*')
+      .single()
+
+    if (error) {
+      console.error('Ошибка сохранения предпочтений:', error)
+      setPreferencesError('Не удалось сохранить предпочтения.')
+      setPreferencesBusy(false)
+      return
+    }
+
+    const saved: UserPreferences = {
+      user_id: String(data.user_id),
+      preference_text: data.preference_text ?? '',
+      city: data.city ?? 'msk',
+      onboarding_completed: data.onboarding_completed === true,
+      calibration_completed_at: data.calibration_completed_at ?? null,
+    }
+    setUserPreferences(saved)
+    setPreferenceTextDraft(saved.preference_text)
+    setPreferenceCityDraft(saved.city)
+    setPreferencesEditing(false)
+    setPreferencesBusy(false)
+
+    if (beginCalibration) {
+      await startCalibration(saved.city)
+    } else {
+      setPreferencesMessage('Предпочтения сохранены.')
+    }
+  }
+
+  function diversifyCalibrationEvents(events: DiscoveryEvent[]) {
+    const buckets = new Map<string, DiscoveryEvent[]>()
+
+    for (const event of events) {
+      const category = event.categories[0] || 'other'
+      buckets.set(category, [...(buckets.get(category) ?? []), event])
+    }
+
+    const selected: DiscoveryEvent[] = []
+    const bucketList = [...buckets.values()]
+
+    while (selected.length < 10 && bucketList.some((bucket) => bucket.length)) {
+      for (const bucket of bucketList) {
+        const event = bucket.shift()
+        if (event) selected.push(event)
+        if (selected.length === 10) break
+      }
+    }
+
+    return selected
+  }
+
+  async function startCalibration(
+    city = userPreferences?.city || 'msk',
+    includePreviouslyRated = false
+  ) {
+    setOnboardingStep('calibration')
+    setCalibrationLoading(true)
+    setCalibrationError('')
+    setCalibrationEvents([])
+    setCalibrationIndex(0)
+    const actualSince = Math.floor(Date.now() / 1000)
+    const { data, error } = await supabase.functions.invoke('event-discovery', {
+      body: {
+        action: 'search_events',
+        location: city,
+        actual_since: actualSince,
+        actual_until: actualSince + 30 * 24 * 60 * 60,
+        page_size: 60,
+      },
+    })
+
+    if (error) {
+      setCalibrationError(await getEdgeFunctionErrorMessage(error))
+      setCalibrationLoading(false)
+      return
+    }
+
+    let events = Array.isArray(data?.events)
+      ? data.events as DiscoveryEvent[]
+      : []
+
+    if (!includePreviouslyRated && session && events.length > 0) {
+      const eventIds = [...new Set(events.map((event) => event.catalog_id))]
+      const { data: existingFeedback, error: feedbackError } = await supabase
+        .from('event_feedback')
+        .select('event_id')
+        .eq('user_id', session.user.id)
+        .in('event_id', eventIds)
+
+      if (feedbackError) {
+        console.error('Ошибка проверки предыдущих реакций:', feedbackError)
+        setCalibrationError(
+          'Не удалось проверить предыдущие ответы. Попробуйте ещё раз.'
+        )
+        setCalibrationLoading(false)
+        return
+      }
+
+      const ratedEventIds = new Set(
+        (existingFeedback ?? []).map((row) => String(row.event_id))
+      )
+      events = events.filter((event) => !ratedEventIds.has(event.catalog_id))
+    }
+
+    const diversified = diversifyCalibrationEvents(events)
+    setCalibrationEvents(diversified)
+    setCalibrationLoading(false)
+
+    if (diversified.length === 0) {
+      setCalibrationError('Не удалось найти мероприятия для калибровки.')
+    }
+  }
+
+  async function answerCalibration(reaction?: Exclude<EventReaction, 'wishlist'>) {
+    if (!session || calibrationBusy) return
+
+    const event = calibrationEvents[calibrationIndex]
+    if (!event) return
+
+    setCalibrationBusy(true)
+    setCalibrationError('')
+
+    if (reaction) {
+      const { error } = await supabase
+        .from('event_feedback')
+        .upsert(
+          {
+            user_id: session.user.id,
+            event_id: event.catalog_id,
+            reaction,
+          },
+          { onConflict: 'user_id,event_id' }
+        )
+
+      if (error) {
+        console.error('Ошибка сохранения ответа калибровки:', error)
+        setCalibrationError('Не удалось сохранить ответ.')
+        setCalibrationBusy(false)
+        return
+      }
+
+      setDiscoveryFeedback((current) => ({
+        ...current,
+        [event.catalog_id]: reaction,
+      }))
+    }
+
+    if (calibrationIndex + 1 < calibrationEvents.length) {
+      setCalibrationIndex((index) => index + 1)
+      setCalibrationBusy(false)
+      return
+    }
+
+    const completedAt = new Date().toISOString()
+    const { error } = await supabase
+      .from('user_preferences')
+      .update({
+        onboarding_completed: true,
+        calibration_completed_at: completedAt,
+      })
+      .eq('user_id', session.user.id)
+
+    if (error) {
+      console.error('Ошибка завершения калибровки:', error)
+      setCalibrationError('Не удалось завершить калибровку.')
+      setCalibrationBusy(false)
+      return
+    }
+
+    setUserPreferences((current) => current
+      ? {
+          ...current,
+          onboarding_completed: true,
+          calibration_completed_at: completedAt,
+        }
+      : current
+    )
+    setCalibrationBusy(false)
+    setOnboardingStep('complete')
   }
 
   async function saveProfile() {
@@ -1108,6 +1434,9 @@ function App() {
 
     const loadedPlans: Plan[] = (plansData ?? []).map((plan) => ({
       id: String(plan.id),
+      event_catalog_id: plan.event_catalog_id
+        ? String(plan.event_catalog_id)
+        : null,
       title: plan.title ?? '',
       type: plan.type ?? 'Другое',
       price: plan.price ?? 'Цена не указана',
@@ -1312,6 +1641,9 @@ function App() {
 
     const addedPlan: Plan = {
       id: String(data.id),
+      event_catalog_id: data.event_catalog_id
+        ? String(data.event_catalog_id)
+        : null,
       title: data.title ?? '',
       type: data.type ?? 'Другое',
       price: data.price ?? 'Цена не указана',
@@ -1391,6 +1723,9 @@ function App() {
 
     const updatedPlan: Plan = {
       id: String(data.id),
+      event_catalog_id: data.event_catalog_id
+        ? String(data.event_catalog_id)
+        : editingPlan.event_catalog_id ?? null,
       title: data.title ?? '',
       type: data.type ?? 'Другое',
       price: data.price ?? 'Цена не указана',
@@ -2163,13 +2498,273 @@ function App() {
   const userEmail = profile?.email || session.user.email || 'Пользователь'
   const userDisplayName = profile?.display_name || userEmail
 
-  if (activeView === 'discovery') {
+  if (!preferencesLoading && onboardingStep === 'preferences') {
+    return (
+      <div style={pageContainerStyle}>
+        <h1 style={pageTitleStyle}>Расскажите, что вам нравится</h1>
+        <p style={pageDescriptionStyle}>
+          Напишите своими словами, какие места, мероприятия и форматы вам
+          обычно нравятся. Можно написать и то, что вы не любите.
+        </p>
+        <div style={contentCardStyle}>
+          <label style={fieldLabelStyle}>Мои предпочтения</label>
+          <textarea
+            value={preferenceTextDraft}
+            onChange={(event) => setPreferenceTextDraft(event.target.value)}
+            rows={8}
+            placeholder="Люблю камерные концерты, современное искусство, необычные кафе, прогулки и небольшие мероприятия. Не люблю большие толпы и шумные клубы. Обычно готов потратить до 5000 ₽."
+            disabled={preferencesBusy}
+            style={textareaStyle}
+          />
+          <label style={fieldLabelStyle}>Основной город</label>
+          <select
+            value={preferenceCityDraft}
+            onChange={(event) => setPreferenceCityDraft(event.target.value)}
+            disabled={preferencesBusy}
+            style={inputStyle}
+          >
+            {DISCOVERY_LOCATIONS.map((location) => (
+              <option key={location.slug} value={location.slug}>
+                {location.name}
+              </option>
+            ))}
+          </select>
+          {preferencesError && <div style={authErrorStyle}>{preferencesError}</div>}
+          <button
+            onClick={() => void saveUserPreferences(true)}
+            disabled={preferencesBusy}
+            style={{ ...mainButtonStyle, marginTop: 18 }}
+          >
+            {preferencesBusy ? 'Сохраняю…' : 'Продолжить'}
+          </button>
+          <button
+            onClick={() => setOnboardingStep(null)}
+            disabled={preferencesBusy}
+            style={cancelButtonStyle}
+          >
+            Пропустить пока
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  if (onboardingStep === 'calibration') {
+    const calibrationEvent = calibrationEvents[calibrationIndex]
+
+    return (
+      <div style={pageContainerStyle}>
+        <h1 style={pageTitleStyle}>Давайте немного уточним ваши вкусы</h1>
+        <p style={pageDescriptionStyle}>
+          Выберите отношение к нескольким реальным мероприятиям.
+        </p>
+        {calibrationLoading && <div style={emptyRankingStyle}>Загрузка…</div>}
+        {calibrationError && <div style={authErrorStyle}>{calibrationError}</div>}
+        {!calibrationLoading && calibrationEvent && (
+          <>
+            <div style={calibrationProgressStyle}>
+              {calibrationIndex + 1} из {calibrationEvents.length}
+            </div>
+            <CalibrationEventCard event={calibrationEvent} />
+            <div style={calibrationActionsStyle}>
+              <button
+                onClick={() => void answerCalibration('interested')}
+                disabled={calibrationBusy}
+                style={secondaryButtonStyle}
+              >
+                ❤️ Нравится
+              </button>
+              <button
+                onClick={() => void answerCalibration('not_interested')}
+                disabled={calibrationBusy}
+                style={secondaryButtonStyle}
+              >
+                👎 Не моё
+              </button>
+              <button
+                onClick={() => void answerCalibration()}
+                disabled={calibrationBusy}
+                style={cancelButtonStyle}
+              >
+                → Пропустить
+              </button>
+            </div>
+          </>
+        )}
+        {!calibrationLoading && !calibrationEvent && (
+          <button onClick={() => setOnboardingStep(null)} style={cancelButtonStyle}>
+            Вернуться в приложение
+          </button>
+        )}
+      </div>
+    )
+  }
+
+  if (onboardingStep === 'complete') {
+    return (
+      <div style={pageContainerStyle}>
+        <div style={contentCardStyle}>
+          <h1 style={pageTitleStyle}>Готово!</h1>
+          <p style={pageDescriptionStyle}>
+            Мы получили первое представление о ваших предпочтениях.
+          </p>
+          <button
+            onClick={() => {
+              setOnboardingStep(null)
+              setActiveView('discovery')
+            }}
+            style={mainButtonStyle}
+          >
+            Перейти в Афишу
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  if (activeView === 'recommendations') {
+    const visibleRecommendations = recommendations.filter(
+      (event) => discoveryFeedback[event.catalog_id] !== 'not_interested'
+    )
+
     return (
       <div style={pageContainerStyle}>
         <UserBar
           email={userEmail}
           displayName={userDisplayName}
           groupName={activeGroup.name}
+          canEditGroup={activeGroupRole === 'owner'}
+          busy={authBusy}
+          onOpenProfile={() => setActiveView('profile')}
+          onOpenGroup={() => setActiveView('group')}
+          onLogout={handleSignOut}
+        />
+
+        <h1 style={pageTitleStyle}>✨ Для меня</h1>
+        <p style={pageDescriptionStyle}>
+          Подборка на основе ваших интересов и истории.
+        </p>
+
+        {!userPreferences?.onboarding_completed ? (
+          <div style={contentCardStyle}>
+            <h2 style={sectionTitleStyle}>Расскажите о своих вкусах</h2>
+            <p style={{ ...pageDescriptionStyle, marginBottom: 16 }}>
+              Заполните предпочтения, чтобы мы могли подобрать подходящие мероприятия.
+            </p>
+            <button
+              onClick={() => setOnboardingStep('preferences')}
+              style={mainButtonStyle}
+            >
+              Рассказать о вкусах
+            </button>
+          </div>
+        ) : (
+          <>
+            {recommendationsFeedbackCount < 5 && (
+              <div style={recommendationHintStyle}>
+                Чем больше вы оцениваете мероприятия, тем точнее становятся рекомендации.
+              </div>
+            )}
+
+            <button
+              onClick={() => void loadPersonalizedRecommendations(recommendationsOffset)}
+              disabled={recommendationsLoading}
+              style={{
+                ...mainButtonStyle,
+                marginBottom: 18,
+                opacity: recommendationsLoading ? 0.6 : 1,
+              }}
+            >
+              {recommendationsLoading
+                ? 'Подбираю…'
+                : recommendationsSearched
+                  ? '✨ Подобрать ещё'
+                  : '✨ Подобрать мероприятия'}
+            </button>
+
+            {recommendationsError && (
+              <div style={authErrorStyle}>{recommendationsError}</div>
+            )}
+            {discoveryFeedbackError && (
+              <div style={authErrorStyle}>{discoveryFeedbackError}</div>
+            )}
+            {discoveryPlanError && (
+              <div style={authErrorStyle}>{discoveryPlanError}</div>
+            )}
+            {discoveryPlanMessage && (
+              <div style={authSuccessStyle}>{discoveryPlanMessage}</div>
+            )}
+
+            {!recommendationsLoading &&
+              recommendationsSearched &&
+              !recommendationsError &&
+              visibleRecommendations.length === 0 && (
+                <div style={emptyRankingStyle}>
+                  Пока не удалось найти новые подходящие мероприятия.
+                </div>
+              )}
+
+            {!recommendationsLoading && visibleRecommendations.length > 0 && (
+              <div style={discoveryListStyle}>
+                {visibleRecommendations.map((event) => {
+                  const alreadyAdded = event.is_in_plans || plans.some(
+                    (plan) => plan.event_catalog_id === event.catalog_id
+                  )
+
+                  return (
+                    <DiscoveryEventCard
+                      key={event.catalog_id}
+                      event={event}
+                      reaction={discoveryFeedback[event.catalog_id]}
+                      reasons={event.reasons}
+                      feedbackBusy={discoveryFeedbackBusy === event.catalog_id}
+                      planBusy={discoveryPlanBusy === event.catalog_id}
+                      alreadyAdded={alreadyAdded}
+                      onReaction={(reaction) =>
+                        void toggleDiscoveryReaction(event.catalog_id, reaction)
+                      }
+                      onAddToPlans={() => void addDiscoveryEventToPlans(event)}
+                    />
+                  )
+                })}
+              </div>
+            )}
+          </>
+        )}
+
+        <div style={discoverySourceStyle}>
+          Источник данных:{' '}
+          <a href="https://kudago.com/" target="_blank" rel="noreferrer">
+            KudaGo
+          </a>
+        </div>
+
+        <BottomNavigation
+          activeView={activeView}
+          onNavigate={navigateTo}
+          onAdd={() => {
+            setActiveView('home')
+            setShowAddForm(true)
+          }}
+        />
+      </div>
+    )
+  }
+
+  if (activeView === 'discovery') {
+    const visibleDiscoveryEvents = discoveryEvents.filter(
+      (event) =>
+        showHiddenDiscoveryEvents ||
+        discoveryFeedback[event.catalog_id] !== 'not_interested'
+    )
+
+    return (
+      <div style={pageContainerStyle}>
+        <UserBar
+          email={userEmail}
+          displayName={userDisplayName}
+          groupName={activeGroup.name}
+          canEditGroup={activeGroupRole === 'owner'}
           busy={authBusy}
           onOpenProfile={() => setActiveView('profile')}
           onOpenGroup={() => setActiveView('group')}
@@ -2225,24 +2820,66 @@ function App() {
           >
             {discoveryLoading ? 'Загрузка…' : 'Найти мероприятия'}
           </button>
+
+          <button
+            type="button"
+            onClick={() => setShowHiddenDiscoveryEvents((current) => !current)}
+            aria-pressed={showHiddenDiscoveryEvents}
+            style={{
+              ...discoveryHiddenToggleStyle,
+              ...(showHiddenDiscoveryEvents
+                ? discoveryHiddenToggleActiveStyle
+                : {}),
+            }}
+          >
+            {showHiddenDiscoveryEvents ? 'Скрыть отмеченные «Не моё»' : 'Показать скрытые'}
+          </button>
         </div>
 
         {discoveryError && <div style={authErrorStyle}>{discoveryError}</div>}
+        {discoveryFeedbackError && (
+          <div style={authErrorStyle}>{discoveryFeedbackError}</div>
+        )}
+        {discoveryPlanError && (
+          <div style={authErrorStyle}>{discoveryPlanError}</div>
+        )}
+        {discoveryPlanMessage && (
+          <div style={authSuccessStyle}>{discoveryPlanMessage}</div>
+        )}
 
         {!discoveryLoading &&
           discoverySearched &&
           !discoveryError &&
-          discoveryEvents.length === 0 && (
+          visibleDiscoveryEvents.length === 0 && (
             <div style={emptyRankingStyle}>
-              На выбранный период мероприятия не найдены
+              {discoveryEvents.length > 0
+                ? 'Все найденные мероприятия скрыты вашей реакцией «Не моё»'
+                : 'На выбранный период мероприятия не найдены'}
             </div>
           )}
 
-        {!discoveryLoading && discoveryEvents.length > 0 && (
+        {!discoveryLoading && visibleDiscoveryEvents.length > 0 && (
           <div style={discoveryListStyle}>
-            {discoveryEvents.map((event) => (
-              <DiscoveryEventCard key={`${event.source}-${event.source_id}`} event={event} />
-            ))}
+            {visibleDiscoveryEvents.map((event) => {
+              const alreadyAdded = plans.some(
+                (plan) => plan.event_catalog_id === event.catalog_id
+              )
+
+              return (
+                <DiscoveryEventCard
+                  key={event.catalog_id}
+                  event={event}
+                  reaction={discoveryFeedback[event.catalog_id]}
+                  feedbackBusy={discoveryFeedbackBusy === event.catalog_id}
+                  planBusy={discoveryPlanBusy === event.catalog_id}
+                  alreadyAdded={alreadyAdded}
+                  onReaction={(reaction) =>
+                    void toggleDiscoveryReaction(event.catalog_id, reaction)
+                  }
+                  onAddToPlans={() => void addDiscoveryEventToPlans(event)}
+                />
+              )
+            })}
           </div>
         )}
 
@@ -2255,7 +2892,7 @@ function App() {
 
         <BottomNavigation
           activeView={activeView}
-          onNavigate={setActiveView}
+          onNavigate={navigateTo}
           onAdd={() => {
             setActiveView('home')
             setShowAddForm(true)
@@ -2272,6 +2909,7 @@ function App() {
           email={userEmail}
           displayName={userDisplayName}
           groupName={activeGroup.name}
+          canEditGroup={activeGroupRole === 'owner'}
           busy={authBusy}
           onOpenProfile={() => setActiveView('profile')}
           onOpenGroup={() => setActiveView('group')}
@@ -2314,9 +2952,93 @@ function App() {
           </button>
         </div>
 
+        <h2 style={{ ...sectionTitleStyle, marginTop: 28 }}>Мои вкусы</h2>
+        <div style={contentCardStyle}>
+          {preferencesLoading && <div>Загрузка предпочтений…</div>}
+          {!preferencesLoading && preferencesEditing ? (
+            <>
+              <label style={fieldLabelStyle}>Предпочтения</label>
+              <textarea
+                value={preferenceTextDraft}
+                onChange={(event) => setPreferenceTextDraft(event.target.value)}
+                rows={7}
+                disabled={preferencesBusy}
+                style={textareaStyle}
+              />
+              <label style={fieldLabelStyle}>Основной город</label>
+              <select
+                value={preferenceCityDraft}
+                onChange={(event) => setPreferenceCityDraft(event.target.value)}
+                disabled={preferencesBusy}
+                style={inputStyle}
+              >
+                {DISCOVERY_LOCATIONS.map((location) => (
+                  <option key={location.slug} value={location.slug}>
+                    {location.name}
+                  </option>
+                ))}
+              </select>
+              <button
+                onClick={() => void saveUserPreferences(false)}
+                disabled={preferencesBusy}
+                style={{ ...mainButtonStyle, marginTop: 18 }}
+              >
+                {preferencesBusy ? 'Сохраняю…' : 'Сохранить предпочтения'}
+              </button>
+              <button
+                onClick={() => {
+                  setPreferencesEditing(false)
+                  setPreferenceTextDraft(userPreferences?.preference_text ?? '')
+                  setPreferenceCityDraft(userPreferences?.city ?? 'msk')
+                  setPreferencesError('')
+                }}
+                disabled={preferencesBusy}
+                style={cancelButtonStyle}
+              >
+                Отмена
+              </button>
+            </>
+          ) : (
+            !preferencesLoading && (
+              <>
+                <div style={preferencesTextStyle}>
+                  {userPreferences?.preference_text || 'Предпочтения пока не заполнены.'}
+                </div>
+                <div style={preferencesCityStyle}>
+                  Город:{' '}
+                  {DISCOVERY_LOCATIONS.find(
+                    (location) => location.slug === userPreferences?.city
+                  )?.name ?? 'Не выбран'}
+                </div>
+                <button
+                  onClick={() => {
+                    setPreferenceTextDraft(userPreferences?.preference_text ?? '')
+                    setPreferenceCityDraft(userPreferences?.city ?? 'msk')
+                    setPreferencesEditing(true)
+                    setPreferencesMessage('')
+                  }}
+                  style={{ ...secondaryButtonStyle, marginTop: 16 }}
+                >
+                  Изменить предпочтения
+                </button>
+                <button
+                  onClick={() => void startCalibration(undefined, true)}
+                  style={{ ...secondaryButtonStyle, marginTop: 10 }}
+                >
+                  Пройти калибровку заново
+                </button>
+              </>
+            )
+          )}
+          {preferencesError && <div style={authErrorStyle}>{preferencesError}</div>}
+          {preferencesMessage && (
+            <div style={authSuccessStyle}>{preferencesMessage}</div>
+          )}
+        </div>
+
         <BottomNavigation
           activeView={activeView}
-          onNavigate={setActiveView}
+          onNavigate={navigateTo}
           onAdd={() => {
             setActiveView('home')
             setShowAddForm(true)
@@ -2333,6 +3055,7 @@ function App() {
           email={userEmail}
           displayName={userDisplayName}
           groupName={activeGroup.name}
+          canEditGroup={activeGroupRole === 'owner'}
           busy={authBusy}
           onOpenProfile={() => setActiveView('profile')}
           onOpenGroup={() => setActiveView('group')}
@@ -2426,151 +3149,6 @@ function App() {
         </div>
 
         <h2 style={{ ...sectionTitleStyle, marginTop: 28 }}>
-          Google Таблица
-        </h2>
-
-        <div style={contentCardStyle}>
-          {googleSheetLoading && (
-            <div style={integrationMutedTextStyle}>Проверяю подключение…</div>
-          )}
-
-          {!googleSheetLoading && !googleSheetIntegration && !googleSheetFormOpen && (
-            <>
-              <div style={integrationMutedTextStyle}>
-                Google Таблица пока не подключена к этой группе.
-              </div>
-              {activeGroupRole === 'owner' && (
-                <button
-                  onClick={() => void openGoogleSheetForm()}
-                  style={{ ...secondaryButtonStyle, marginTop: 16 }}
-                >
-                  Подключить Google Таблицу
-                </button>
-              )}
-            </>
-          )}
-
-          {googleSheetFormOpen && activeGroupRole === 'owner' && (
-            <>
-              <div style={integrationInstructionStyle}>
-                Предоставьте этому service account доступ Editor к таблице:
-                <strong style={serviceAccountEmailStyle}>
-                  {googleServiceAccountEmail || 'Загружаю email…'}
-                </strong>
-              </div>
-
-              <label style={fieldLabelStyle}>Ссылка на Google Таблицу</label>
-              <input
-                value={googleSheetUrl}
-                onChange={(event) => {
-                  setGoogleSheetUrl(event.target.value)
-                  setGoogleSheetCheck(null)
-                  setGoogleSheetError('')
-                }}
-                placeholder="https://docs.google.com/spreadsheets/d/.../edit"
-                disabled={googleSheetBusy}
-                style={inputStyle}
-              />
-
-              <button
-                onClick={() => void checkGoogleSheet()}
-                disabled={googleSheetBusy}
-                style={{
-                  ...secondaryButtonStyle,
-                  marginTop: 14,
-                  opacity: googleSheetBusy ? 0.6 : 1,
-                }}
-              >
-                {googleSheetBusy ? 'Проверяю…' : 'Проверить подключение'}
-              </button>
-
-              {googleSheetCheck && (
-                <SheetValidationResult result={googleSheetCheck} />
-              )}
-
-              {googleSheetCheck?.validation.valid && (
-                <button
-                  onClick={() => void saveGoogleSheetIntegration()}
-                  disabled={googleSheetBusy}
-                  style={{
-                    ...mainButtonStyle,
-                    marginTop: 14,
-                    opacity: googleSheetBusy ? 0.6 : 1,
-                  }}
-                >
-                  {googleSheetBusy ? 'Сохраняю…' : 'Сохранить подключение'}
-                </button>
-              )}
-
-              <button
-                onClick={closeGoogleSheetForm}
-                disabled={googleSheetBusy}
-                style={cancelButtonStyle}
-              >
-                Отмена
-              </button>
-            </>
-          )}
-
-          {!googleSheetLoading && googleSheetIntegration && !googleSheetFormOpen && (
-            <>
-              <div style={integrationConnectedStyle}>
-                ✅ Google Таблица подключена
-              </div>
-              <div style={integrationDetailsStyle}>
-                <div>Вкладка: {googleSheetIntegration.sheet_name || 'не указана'}</div>
-                <div>ID: {googleSheetIntegration.spreadsheet_id}</div>
-              </div>
-
-              {googleSheetCheck && (
-                <SheetValidationResult result={googleSheetCheck} />
-              )}
-
-              <button disabled style={disabledSyncButtonStyle}>
-                🔄 Обновить из таблицы
-                <span style={{ display: 'block', marginTop: 3, fontSize: 11 }}>
-                  Будет доступно на следующем этапе
-                </span>
-              </button>
-
-              {activeGroupRole === 'owner' && (
-                <div style={integrationActionsStyle}>
-                  <button
-                    onClick={() =>
-                      void checkGoogleSheet(
-                        `https://docs.google.com/spreadsheets/d/${googleSheetIntegration.spreadsheet_id}/edit`
-                      )
-                    }
-                    disabled={googleSheetBusy}
-                    style={copyInviteButtonStyle}
-                  >
-                    {googleSheetBusy ? 'Проверяю…' : 'Проверить снова'}
-                  </button>
-                  <button
-                    onClick={() => void openGoogleSheetForm()}
-                    disabled={googleSheetBusy}
-                    style={copyInviteButtonStyle}
-                  >
-                    Изменить таблицу
-                  </button>
-                  <button
-                    onClick={() => void disconnectGoogleSheet()}
-                    disabled={googleSheetBusy}
-                    style={integrationDisconnectButtonStyle}
-                  >
-                    Отключить
-                  </button>
-                </div>
-              )}
-            </>
-          )}
-
-          {googleSheetError && (
-            <div style={authErrorStyle}>{googleSheetError}</div>
-          )}
-        </div>
-
-        <h2 style={{ ...sectionTitleStyle, marginTop: 28 }}>
           Участники — {groupMembers.length}
         </h2>
 
@@ -2600,7 +3178,7 @@ function App() {
 
         <BottomNavigation
           activeView={activeView}
-          onNavigate={setActiveView}
+          onNavigate={navigateTo}
           onAdd={() => {
             setActiveView('home')
             setShowAddForm(true)
@@ -2625,6 +3203,7 @@ function App() {
           email={userEmail}
           displayName={userDisplayName}
           groupName={activeGroup.name}
+          canEditGroup={activeGroupRole === 'owner'}
           busy={authBusy}
           onOpenProfile={() => setActiveView('profile')}
           onOpenGroup={() => setActiveView('group')}
@@ -2839,34 +3418,14 @@ function App() {
           </>
         )}
 
-        <div style={bottomNavStyle}>
-          <button
-            onClick={() => setActiveView('home')}
-            style={navButtonStyle}
-          >
-            🏠 Главная
-          </button>
-
-          <button
-            onClick={() => setActiveView('ranking')}
-            style={{
-              ...navButtonStyle,
-              fontWeight: 700,
-            }}
-          >
-            🏆 Рейтинг
-          </button>
-
-          <button
-            onClick={() => {
-              setActiveView('home')
-              setShowAddForm(true)
-            }}
-            style={navButtonStyle}
-          >
-            ➕ Добавить
-          </button>
-        </div>
+        <BottomNavigation
+          activeView={activeView}
+          onNavigate={navigateTo}
+          onAdd={() => {
+            setActiveView('home')
+            setShowAddForm(true)
+          }}
+        />
       </div>
     )
   }
@@ -2885,6 +3444,7 @@ function App() {
         email={userEmail}
         displayName={userDisplayName}
         groupName={activeGroup.name}
+        canEditGroup={activeGroupRole === 'owner'}
         busy={authBusy}
         onOpenProfile={() => setActiveView('profile')}
         onOpenGroup={() => setActiveView('group')}
@@ -3327,7 +3887,7 @@ function App() {
         >
           <div
             onClick={(event) => event.stopPropagation()}
-            style={sheetStyle}
+            style={overlayPanelStyle}
           >
             <div
               style={{
@@ -3509,7 +4069,7 @@ function App() {
 
       {showAddForm && (
         <div style={overlayStyle}>
-          <div style={sheetStyle}>
+          <div style={overlayPanelStyle}>
             <h2 style={sheetTitleStyle}>Новый план</h2>
 
             <input
@@ -3590,7 +4150,7 @@ function App() {
 
       {editingPlan && (
         <div style={overlayStyle}>
-          <div style={sheetStyle}>
+          <div style={overlayPanelStyle}>
             <h2 style={sheetTitleStyle}>Редактировать план</h2>
 
             <input
@@ -3676,7 +4236,7 @@ function App() {
         >
           <div
             onClick={(event) => event.stopPropagation()}
-            style={sheetStyle}
+            style={overlayPanelStyle}
           >
             <div
               style={{
@@ -3775,7 +4335,7 @@ function App() {
         >
           <div
             onClick={(event) => event.stopPropagation()}
-            style={sheetStyle}
+            style={overlayPanelStyle}
           >
             <div
               style={{
@@ -3863,7 +4423,7 @@ function App() {
         >
           <div
             onClick={(event) => event.stopPropagation()}
-            style={sheetStyle}
+            style={overlayPanelStyle}
           >
             <div
               style={{
@@ -3944,31 +4504,11 @@ function App() {
         </div>
       )}
 
-      <div style={bottomNavStyle}>
-        <button
-          onClick={() => setActiveView('home')}
-          style={{
-            ...navButtonStyle,
-            fontWeight: 700,
-          }}
-        >
-          🏠 Главная
-        </button>
-
-        <button
-          onClick={() => setActiveView('ranking')}
-          style={navButtonStyle}
-        >
-          🏆 Рейтинг
-        </button>
-
-        <button
-          onClick={() => setShowAddForm(true)}
-          style={navButtonStyle}
-        >
-          ➕ Добавить
-        </button>
-      </div>
+      <BottomNavigation
+        activeView={activeView}
+        onNavigate={navigateTo}
+        onAdd={() => setShowAddForm(true)}
+      />
     </div>
   )
 }
@@ -4028,6 +4568,7 @@ function UserBar({
   email,
   displayName,
   groupName,
+  canEditGroup,
   busy,
   onOpenProfile,
   onOpenGroup,
@@ -4036,6 +4577,7 @@ function UserBar({
   email: string
   displayName: string
   groupName: string
+  canEditGroup: boolean
   busy: boolean
   onOpenProfile: () => void
   onOpenGroup: () => void
@@ -4053,7 +4595,8 @@ function UserBar({
           style={{
             display: 'block',
             width: '100%',
-            padding: 0,
+            minHeight: 28,
+            padding: '4px 6px 4px 0',
             border: 0,
             background: 'transparent',
             color: '#222',
@@ -4066,9 +4609,9 @@ function UserBar({
             textOverflow: 'ellipsis',
             whiteSpace: 'nowrap',
           }}
-          title={groupName}
+          title="Открыть экран группы"
         >
-          👥 {groupName}
+          👥 {groupName} {canEditGroup ? '✏️' : '›'}
         </button>
 
         <button
@@ -4076,7 +4619,8 @@ function UserBar({
           style={{
             display: 'block',
             width: '100%',
-            padding: 0,
+            minHeight: 32,
+            padding: '4px 6px 4px 0',
             border: 0,
             background: 'transparent',
             marginTop: 3,
@@ -4089,10 +4633,10 @@ function UserBar({
             textOverflow: 'ellipsis',
             whiteSpace: 'nowrap',
           }}
-          title={`${displayName} · ${email}`}
+          title="Открыть профиль"
         >
           <span style={{ display: 'block', color: '#333', fontWeight: 600 }}>
-            👤 {displayName}
+            👤 {displayName} ✏️
           </span>
           {displayName !== email && (
             <span style={{ display: 'block', marginTop: 2 }}>{email}</span>
@@ -4114,7 +4658,7 @@ function UserBar({
   )
 }
 
-function DiscoveryEventCard({ event }: { event: DiscoveryEvent }) {
+function CalibrationEventCard({ event }: { event: DiscoveryEvent }) {
   const dateLabel = event.starts_at
     ? new Intl.DateTimeFormat('ru-RU', {
         day: 'numeric',
@@ -4135,6 +4679,59 @@ function DiscoveryEventCard({ event }: { event: DiscoveryEvent }) {
         {event.place_name && (
           <div style={discoveryMetaStyle}>📍 {event.place_name}</div>
         )}
+        <div style={discoveryPriceStyle}>
+          {event.is_free ? 'Бесплатно' : event.price || 'Цена не указана'}
+        </div>
+        {event.description && (
+          <p style={discoveryDescriptionStyle}>{event.description}</p>
+        )}
+      </div>
+    </article>
+  )
+}
+
+function DiscoveryEventCard({
+  event,
+  reaction,
+  reasons,
+  feedbackBusy,
+  planBusy,
+  alreadyAdded,
+  onReaction,
+  onAddToPlans,
+}: {
+  event: DiscoveryEvent
+  reaction?: EventReaction
+  reasons?: string[]
+  feedbackBusy: boolean
+  planBusy: boolean
+  alreadyAdded: boolean
+  onReaction: (reaction: EventReaction) => void
+  onAddToPlans: () => void
+}) {
+  const dateLabel = event.starts_at
+    ? new Intl.DateTimeFormat('ru-RU', {
+        day: 'numeric',
+        month: 'long',
+        hour: '2-digit',
+        minute: '2-digit',
+      }).format(new Date(event.starts_at))
+    : 'Дата уточняется'
+
+  return (
+    <article style={discoveryCardStyle}>
+      {event.image_url && (
+        <img src={event.image_url} alt="" style={discoveryImageStyle} />
+      )}
+      <div style={discoveryCardBodyStyle}>
+        {reaction === 'not_interested' && (
+          <div style={discoveryHiddenBadgeStyle}>👎 Не моё</div>
+        )}
+        <h2 style={discoveryCardTitleStyle}>{event.title}</h2>
+        <div style={discoveryMetaStyle}>🗓 {dateLabel}</div>
+        {event.place_name && (
+          <div style={discoveryMetaStyle}>📍 {event.place_name}</div>
+        )}
         {event.address && (
           <div style={discoveryAddressStyle}>{event.address}</div>
         )}
@@ -4145,6 +4742,57 @@ function DiscoveryEventCard({ event }: { event: DiscoveryEvent }) {
         {event.description && (
           <p style={discoveryDescriptionStyle}>{event.description}</p>
         )}
+        {reasons && reasons.length > 0 && (
+          <div style={recommendationReasonsStyle}>
+            <div style={recommendationReasonsTitleStyle}>
+              ✨ Почему вам подходит
+            </div>
+            {reasons.slice(0, 2).map((reason) => (
+              <div key={reason} style={recommendationReasonStyle}>
+                {reason}
+              </div>
+            ))}
+          </div>
+        )}
+        <div style={discoveryReactionListStyle}>
+          {([
+            ['interested', '❤️ Интересно'],
+            ['not_interested', '👎 Не моё'],
+            ['wishlist', '💛 Желаемое'],
+          ] as const).map(([value, label]) => {
+            const selected = reaction === value
+
+            return (
+              <button
+                key={value}
+                onClick={() => onReaction(value)}
+                disabled={feedbackBusy}
+                aria-pressed={selected}
+                style={{
+                  ...discoveryReactionButtonStyle,
+                  ...(selected ? discoveryReactionSelectedStyle : {}),
+                  opacity: feedbackBusy ? 0.6 : 1,
+                }}
+              >
+                {label}
+              </button>
+            )
+          })}
+        </div>
+        <button
+          onClick={onAddToPlans}
+          disabled={alreadyAdded || planBusy}
+          style={{
+            ...discoveryAddPlanButtonStyle,
+            opacity: alreadyAdded || planBusy ? 0.65 : 1,
+          }}
+        >
+          {alreadyAdded
+            ? '✓ Уже в планах'
+            : planBusy
+              ? 'Добавляю…'
+              : '➕ Добавить в планы'}
+        </button>
         <a
           href={event.source_url}
           target="_blank"
@@ -4176,16 +4824,7 @@ function BottomNavigation({
           fontWeight: activeView === 'home' ? 700 : 400,
         }}
       >
-        🏠 Главная
-      </button>
-      <button
-        onClick={() => onNavigate('ranking')}
-        style={{
-          ...navButtonStyle,
-          fontWeight: activeView === 'ranking' ? 700 : 400,
-        }}
-      >
-        🏆 Рейтинг
+        📋 Мои планы
       </button>
       <button
         onClick={() => onNavigate('discovery')}
@@ -4196,54 +4835,30 @@ function BottomNavigation({
       >
         🔎 Афиша
       </button>
+      <button
+        onClick={() => onNavigate('recommendations')}
+        style={{
+          ...navButtonStyle,
+          fontWeight: activeView === 'recommendations' ? 700 : 400,
+        }}
+      >
+        ✨ Для меня
+      </button>
+      <button
+        onClick={() => onNavigate('ranking')}
+        style={{
+          ...navButtonStyle,
+          fontWeight: activeView === 'ranking' ? 700 : 400,
+        }}
+      >
+        🏆 Рейтинг
+      </button>
       <button onClick={onAdd} style={navButtonStyle}>
         ➕ Добавить
       </button>
     </div>
   )
 }
-
-function SheetValidationResult({ result }: { result: GoogleSheetCheckResult }) {
-  const validation = result.validation
-  const background =
-    validation.status === 'failed'
-      ? '#fff1f1'
-      : validation.status === 'warning'
-        ? '#fff9e8'
-        : '#f2f8f2'
-  const color = validation.status === 'failed' ? '#9b1c1c' : '#355b3b'
-
-  return (
-    <div style={{ ...sheetValidationStyle, background, color }}>
-      <div style={{ fontWeight: 700 }}>
-        {validation.status === 'failed'
-          ? '❌ Структура не прошла проверку'
-          : validation.status === 'warning'
-            ? '⚠️ Таблица доступна, есть предупреждения'
-            : '✅ Структура таблицы подходит'}
-      </div>
-      <div style={sheetValidationDetailsStyle}>
-        <div>Файл: {result.spreadsheetTitle}</div>
-        <div>ID: {result.spreadsheetId}</div>
-        <div>Вкладка: {result.sheetName}</div>
-        <div>Найдено заголовков: {result.headers.length}</div>
-      </div>
-
-      {validation.missingHeaders.length > 0 && (
-        <div style={{ marginTop: 8 }}>
-          Отсутствуют: {validation.missingHeaders.join(', ')}
-        </div>
-      )}
-      {validation.technicalColumnMissing && (
-        <div style={{ marginTop: 6 }}>
-          technicalColumnMissing: true — столбец _plan_id будет добавлен на
-          следующем этапе.
-        </div>
-      )}
-    </div>
-  )
-}
-
 
 function InfoRow({
   label,
@@ -4368,89 +4983,6 @@ const inlineErrorStyle = {
   lineHeight: 1.4,
 }
 
-const integrationMutedTextStyle = {
-  color: '#777',
-  fontSize: 14,
-  lineHeight: 1.5,
-}
-
-const integrationInstructionStyle = {
-  padding: 12,
-  borderRadius: 10,
-  background: '#f7f7f7',
-  color: '#555',
-  fontSize: 13,
-  lineHeight: 1.5,
-}
-
-const serviceAccountEmailStyle = {
-  display: 'block',
-  marginTop: 5,
-  color: '#222',
-  overflowWrap: 'anywhere' as const,
-}
-
-const integrationConnectedStyle = {
-  color: '#2f6b3a',
-  fontSize: 16,
-  fontWeight: 700,
-}
-
-const integrationDetailsStyle = {
-  display: 'grid',
-  gap: 4,
-  marginTop: 10,
-  color: '#666',
-  fontSize: 13,
-  overflowWrap: 'anywhere' as const,
-}
-
-const integrationActionsStyle = {
-  display: 'flex',
-  flexWrap: 'wrap' as const,
-  gap: 8,
-  marginTop: 12,
-}
-
-const integrationDisconnectButtonStyle = {
-  flexShrink: 0,
-  padding: '8px 10px',
-  border: '1px solid #ddd',
-  borderRadius: 9,
-  background: 'white',
-  color: '#9b1c1c',
-  fontSize: 13,
-  cursor: 'pointer',
-  fontFamily: 'inherit',
-}
-
-const disabledSyncButtonStyle = {
-  width: '100%',
-  marginTop: 16,
-  padding: '11px 12px',
-  border: '1px solid #ddd',
-  borderRadius: 10,
-  background: '#f4f4f4',
-  color: '#888',
-  cursor: 'not-allowed',
-  fontFamily: 'inherit',
-}
-
-const sheetValidationStyle = {
-  marginTop: 14,
-  padding: 12,
-  borderRadius: 10,
-  fontSize: 13,
-  lineHeight: 1.45,
-}
-
-const sheetValidationDetailsStyle = {
-  display: 'grid',
-  gap: 3,
-  marginTop: 8,
-  overflowWrap: 'anywhere' as const,
-}
-
 const memberCardStyle = {
   display: 'flex',
   alignItems: 'center',
@@ -4511,6 +5043,25 @@ const discoveryPeriodActiveStyle = {
   fontWeight: 700,
 }
 
+const discoveryHiddenToggleStyle = {
+  display: 'block',
+  margin: '14px auto 0',
+  padding: '7px 11px',
+  border: '1px solid #ddd',
+  borderRadius: 999,
+  background: 'white',
+  color: '#555',
+  fontSize: 13,
+  cursor: 'pointer',
+  fontFamily: 'inherit',
+}
+
+const discoveryHiddenToggleActiveStyle = {
+  borderColor: '#d8b4b4',
+  background: '#fff6f6',
+  color: '#8a3434',
+}
+
 const discoveryListStyle = {
   display: 'grid',
   gap: 14,
@@ -4534,6 +5085,17 @@ const discoveryImageStyle = {
 
 const discoveryCardBodyStyle = {
   padding: 16,
+}
+
+const discoveryHiddenBadgeStyle = {
+  display: 'inline-block',
+  marginBottom: 9,
+  padding: '5px 9px',
+  borderRadius: 999,
+  background: '#fff0f0',
+  color: '#9b2c2c',
+  fontSize: 13,
+  fontWeight: 700,
 }
 
 const discoveryCardTitleStyle = {
@@ -4574,12 +5136,85 @@ const discoveryDescriptionStyle = {
   WebkitLineClamp: 3,
 }
 
+const recommendationHintStyle = {
+  marginBottom: 16,
+  padding: '12px 14px',
+  borderRadius: 12,
+  background: '#f5f3ff',
+  color: '#5b4b8a',
+  fontSize: 14,
+  lineHeight: 1.45,
+}
+
+const recommendationReasonsStyle = {
+  marginTop: 14,
+  padding: 12,
+  borderRadius: 12,
+  background: '#faf8ff',
+  border: '1px solid #ece7ff',
+}
+
+const recommendationReasonsTitleStyle = {
+  marginBottom: 7,
+  color: '#5b4b8a',
+  fontSize: 14,
+  fontWeight: 700,
+}
+
+const recommendationReasonStyle = {
+  marginTop: 4,
+  color: '#555',
+  fontSize: 13,
+  lineHeight: 1.4,
+}
+
 const discoveryDetailsLinkStyle = {
   display: 'inline-block',
   marginTop: 14,
   color: '#222',
   fontSize: 14,
   fontWeight: 700,
+}
+
+const discoveryReactionListStyle = {
+  display: 'grid',
+  gridTemplateColumns: 'repeat(3, 1fr)',
+  gap: 7,
+  marginTop: 14,
+}
+
+const discoveryReactionButtonStyle = {
+  minWidth: 0,
+  padding: '9px 5px',
+  border: '1px solid #ddd',
+  borderRadius: 10,
+  background: 'white',
+  color: '#444',
+  fontSize: 12,
+  lineHeight: 1.25,
+  cursor: 'pointer',
+  fontFamily: 'inherit',
+}
+
+const discoveryReactionSelectedStyle = {
+  borderColor: '#222',
+  background: '#f1f1f1',
+  color: '#111',
+  fontWeight: 700,
+}
+
+const discoveryAddPlanButtonStyle = {
+  width: '100%',
+  marginTop: 12,
+  padding: '11px 10px',
+  border: '1px solid #d8d8d8',
+  borderRadius: 10,
+  background: '#f7f7f7',
+  color: '#222',
+  fontSize: 14,
+  fontWeight: 700,
+  cursor: 'pointer',
+  fontFamily: 'inherit',
 }
 
 const discoverySourceStyle = {
@@ -4835,6 +5470,40 @@ const inputStyle = {
   fontFamily: 'inherit',
 }
 
+const textareaStyle = {
+  ...inputStyle,
+  minHeight: 150,
+  resize: 'vertical' as const,
+  lineHeight: 1.5,
+}
+
+const calibrationProgressStyle = {
+  marginBottom: 14,
+  color: '#666',
+  fontSize: 14,
+  fontWeight: 600,
+  textAlign: 'center' as const,
+}
+
+const calibrationActionsStyle = {
+  display: 'grid',
+  gap: 10,
+  marginTop: 16,
+}
+
+const preferencesTextStyle = {
+  marginTop: 8,
+  whiteSpace: 'pre-wrap' as const,
+  lineHeight: 1.5,
+  color: '#333',
+}
+
+const preferencesCityStyle = {
+  marginTop: 10,
+  color: '#666',
+  fontSize: 14,
+}
+
 const mainButtonStyle = {
   width: '100%',
   padding: 15,
@@ -4912,7 +5581,7 @@ const overlayStyle = {
   zIndex: 20,
 }
 
-const sheetStyle = {
+const overlayPanelStyle = {
   width: '100%',
   maxWidth: 520,
   maxHeight: '90vh',
