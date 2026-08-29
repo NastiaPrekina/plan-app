@@ -49,7 +49,7 @@ type RatingSummary = {
   count: number
 }
 
-type AppView = 'home' | 'ranking' | 'group' | 'profile'
+type AppView = 'home' | 'ranking' | 'discovery' | 'group' | 'profile'
 type AuthMode = 'login' | 'register'
 
 type Group = {
@@ -103,6 +103,34 @@ type GoogleSheetCheckResult = {
   validation: GoogleSheetValidation
 }
 
+type DiscoveryEvent = {
+  source: 'kudago'
+  source_id: string
+  title: string
+  description: string
+  starts_at: string | null
+  ends_at: string | null
+  place_name: string
+  address: string
+  price: string
+  is_free: boolean
+  image_url: string
+  source_url: string
+  categories: string[]
+  age_restriction: string
+}
+
+const DISCOVERY_LOCATIONS = [
+  { slug: 'msk', name: 'Москва' },
+  { slug: 'spb', name: 'Санкт-Петербург' },
+] as const
+
+const DISCOVERY_PERIODS = [
+  { days: 1, label: 'Сегодня' },
+  { days: 7, label: '7 дней' },
+  { days: 30, label: '30 дней' },
+] as const
+
 function App() {
   const [session, setSession] = useState<Session | null>(null)
   const [authLoading, setAuthLoading] = useState(true)
@@ -146,6 +174,12 @@ function App() {
   const [googleSheetCheck, setGoogleSheetCheck] =
     useState<GoogleSheetCheckResult | null>(null)
   const [googleSheetError, setGoogleSheetError] = useState('')
+  const [discoveryLocation, setDiscoveryLocation] = useState('msk')
+  const [discoveryPeriod, setDiscoveryPeriod] = useState(7)
+  const [discoveryEvents, setDiscoveryEvents] = useState<DiscoveryEvent[]>([])
+  const [discoveryLoading, setDiscoveryLoading] = useState(false)
+  const [discoverySearched, setDiscoverySearched] = useState(false)
+  const [discoveryError, setDiscoveryError] = useState('')
 
   const [plans, setPlans] = useState<Plan[]>([])
   const [planEvents, setPlanEvents] = useState<PlanEvent[]>([])
@@ -941,6 +975,46 @@ function App() {
     setGoogleSheetCheck(null)
     setGoogleSheetUrl('')
     setGoogleSheetBusy(false)
+  }
+
+  async function searchDiscoveryEvents() {
+    const nowMilliseconds = Date.now()
+    const actualSince = Math.floor(nowMilliseconds / 1000)
+    const dayMilliseconds = 24 * 60 * 60 * 1000
+    const moscowOffsetMilliseconds = 3 * 60 * 60 * 1000
+    const actualUntil = discoveryPeriod === 1
+      ? Math.floor(
+          ((Math.floor(
+            (nowMilliseconds + moscowOffsetMilliseconds) / dayMilliseconds
+          ) + 1) * dayMilliseconds - moscowOffsetMilliseconds) / 1000
+        )
+      : actualSince + discoveryPeriod * 24 * 60 * 60
+
+    setDiscoveryLoading(true)
+    setDiscoverySearched(true)
+    setDiscoveryError('')
+
+    const { data, error } = await supabase.functions.invoke('event-discovery', {
+      body: {
+        action: 'search_events',
+        location: discoveryLocation,
+        actual_since: actualSince,
+        actual_until: actualUntil,
+        page_size: 30,
+      },
+    })
+
+    if (error) {
+      setDiscoveryEvents([])
+      setDiscoveryError(await getEdgeFunctionErrorMessage(error))
+      setDiscoveryLoading(false)
+      return
+    }
+
+    setDiscoveryEvents(
+      Array.isArray(data?.events) ? data.events as DiscoveryEvent[] : []
+    )
+    setDiscoveryLoading(false)
   }
 
   async function saveProfile() {
@@ -2088,6 +2162,108 @@ function App() {
 
   const userEmail = profile?.email || session.user.email || 'Пользователь'
   const userDisplayName = profile?.display_name || userEmail
+
+  if (activeView === 'discovery') {
+    return (
+      <div style={pageContainerStyle}>
+        <UserBar
+          email={userEmail}
+          displayName={userDisplayName}
+          groupName={activeGroup.name}
+          busy={authBusy}
+          onOpenProfile={() => setActiveView('profile')}
+          onOpenGroup={() => setActiveView('group')}
+          onLogout={handleSignOut}
+        />
+
+        <h1 style={pageTitleStyle}>🔎 Афиша</h1>
+        <p style={pageDescriptionStyle}>
+          Реальные мероприятия в выбранном городе и периоде.
+        </p>
+
+        <div style={contentCardStyle}>
+          <label style={fieldLabelStyle}>Город</label>
+          <select
+            value={discoveryLocation}
+            onChange={(event) => setDiscoveryLocation(event.target.value)}
+            disabled={discoveryLoading}
+            style={inputStyle}
+          >
+            {DISCOVERY_LOCATIONS.map((location) => (
+              <option key={location.slug} value={location.slug}>
+                {location.name}
+              </option>
+            ))}
+          </select>
+
+          <div style={discoveryPeriodStyle}>
+            {DISCOVERY_PERIODS.map((period) => (
+              <button
+                key={period.days}
+                onClick={() => setDiscoveryPeriod(period.days)}
+                disabled={discoveryLoading}
+                style={{
+                  ...discoveryPeriodButtonStyle,
+                  ...(discoveryPeriod === period.days
+                    ? discoveryPeriodActiveStyle
+                    : {}),
+                }}
+              >
+                {period.label}
+              </button>
+            ))}
+          </div>
+
+          <button
+            onClick={() => void searchDiscoveryEvents()}
+            disabled={discoveryLoading}
+            style={{
+              ...mainButtonStyle,
+              marginTop: 18,
+              opacity: discoveryLoading ? 0.6 : 1,
+            }}
+          >
+            {discoveryLoading ? 'Загрузка…' : 'Найти мероприятия'}
+          </button>
+        </div>
+
+        {discoveryError && <div style={authErrorStyle}>{discoveryError}</div>}
+
+        {!discoveryLoading &&
+          discoverySearched &&
+          !discoveryError &&
+          discoveryEvents.length === 0 && (
+            <div style={emptyRankingStyle}>
+              На выбранный период мероприятия не найдены
+            </div>
+          )}
+
+        {!discoveryLoading && discoveryEvents.length > 0 && (
+          <div style={discoveryListStyle}>
+            {discoveryEvents.map((event) => (
+              <DiscoveryEventCard key={`${event.source}-${event.source_id}`} event={event} />
+            ))}
+          </div>
+        )}
+
+        <div style={discoverySourceStyle}>
+          Источник данных:{' '}
+          <a href="https://kudago.com/" target="_blank" rel="noreferrer">
+            KudaGo
+          </a>
+        </div>
+
+        <BottomNavigation
+          activeView={activeView}
+          onNavigate={setActiveView}
+          onAdd={() => {
+            setActiveView('home')
+            setShowAddForm(true)
+          }}
+        />
+      </div>
+    )
+  }
 
   if (activeView === 'profile') {
     return (
@@ -3938,6 +4114,50 @@ function UserBar({
   )
 }
 
+function DiscoveryEventCard({ event }: { event: DiscoveryEvent }) {
+  const dateLabel = event.starts_at
+    ? new Intl.DateTimeFormat('ru-RU', {
+        day: 'numeric',
+        month: 'long',
+        hour: '2-digit',
+        minute: '2-digit',
+      }).format(new Date(event.starts_at))
+    : 'Дата уточняется'
+
+  return (
+    <article style={discoveryCardStyle}>
+      {event.image_url && (
+        <img src={event.image_url} alt="" style={discoveryImageStyle} />
+      )}
+      <div style={discoveryCardBodyStyle}>
+        <h2 style={discoveryCardTitleStyle}>{event.title}</h2>
+        <div style={discoveryMetaStyle}>🗓 {dateLabel}</div>
+        {event.place_name && (
+          <div style={discoveryMetaStyle}>📍 {event.place_name}</div>
+        )}
+        {event.address && (
+          <div style={discoveryAddressStyle}>{event.address}</div>
+        )}
+        <div style={discoveryPriceStyle}>
+          {event.is_free ? 'Бесплатно' : event.price || 'Цена не указана'}
+          {event.age_restriction ? ` · ${event.age_restriction}` : ''}
+        </div>
+        {event.description && (
+          <p style={discoveryDescriptionStyle}>{event.description}</p>
+        )}
+        <a
+          href={event.source_url}
+          target="_blank"
+          rel="noreferrer"
+          style={discoveryDetailsLinkStyle}
+        >
+          Подробнее
+        </a>
+      </div>
+    </article>
+  )
+}
+
 function BottomNavigation({
   activeView,
   onNavigate,
@@ -3966,6 +4186,15 @@ function BottomNavigation({
         }}
       >
         🏆 Рейтинг
+      </button>
+      <button
+        onClick={() => onNavigate('discovery')}
+        style={{
+          ...navButtonStyle,
+          fontWeight: activeView === 'discovery' ? 700 : 400,
+        }}
+      >
+        🔎 Афиша
       </button>
       <button onClick={onAdd} style={navButtonStyle}>
         ➕ Добавить
@@ -4258,6 +4487,108 @@ const roleBadgeStyle = {
   fontWeight: 600,
 }
 
+const discoveryPeriodStyle = {
+  display: 'grid',
+  gridTemplateColumns: 'repeat(3, 1fr)',
+  gap: 8,
+  marginTop: 16,
+}
+
+const discoveryPeriodButtonStyle = {
+  padding: '10px 6px',
+  border: '1px solid #ddd',
+  borderRadius: 10,
+  background: 'white',
+  color: '#555',
+  cursor: 'pointer',
+  fontFamily: 'inherit',
+}
+
+const discoveryPeriodActiveStyle = {
+  borderColor: '#222',
+  background: '#222',
+  color: 'white',
+  fontWeight: 700,
+}
+
+const discoveryListStyle = {
+  display: 'grid',
+  gap: 14,
+  marginTop: 20,
+}
+
+const discoveryCardStyle = {
+  overflow: 'hidden',
+  border: '1px solid #e5e5e5',
+  borderRadius: 16,
+  background: 'white',
+}
+
+const discoveryImageStyle = {
+  display: 'block',
+  width: '100%',
+  height: 190,
+  objectFit: 'cover' as const,
+  background: '#f2f2f2',
+}
+
+const discoveryCardBodyStyle = {
+  padding: 16,
+}
+
+const discoveryCardTitleStyle = {
+  margin: '0 0 10px',
+  fontSize: 19,
+  lineHeight: 1.3,
+}
+
+const discoveryMetaStyle = {
+  marginTop: 5,
+  color: '#444',
+  fontSize: 14,
+  lineHeight: 1.4,
+}
+
+const discoveryAddressStyle = {
+  marginTop: 3,
+  color: '#777',
+  fontSize: 13,
+  lineHeight: 1.4,
+}
+
+const discoveryPriceStyle = {
+  marginTop: 10,
+  color: '#355b3b',
+  fontSize: 14,
+  fontWeight: 700,
+}
+
+const discoveryDescriptionStyle = {
+  display: '-webkit-box',
+  margin: '12px 0 0',
+  overflow: 'hidden',
+  color: '#666',
+  fontSize: 14,
+  lineHeight: 1.5,
+  WebkitBoxOrient: 'vertical' as const,
+  WebkitLineClamp: 3,
+}
+
+const discoveryDetailsLinkStyle = {
+  display: 'inline-block',
+  marginTop: 14,
+  color: '#222',
+  fontSize: 14,
+  fontWeight: 700,
+}
+
+const discoverySourceStyle = {
+  marginTop: 20,
+  color: '#888',
+  fontSize: 12,
+  textAlign: 'center' as const,
+}
+
 const sectionTitleStyle = {
   margin: '0 0 12px',
   fontSize: 22,
@@ -4468,17 +4799,20 @@ const bottomNavStyle = {
   padding: '12px 10px calc(12px + env(safe-area-inset-bottom))',
   display: 'flex',
   justifyContent: 'center',
-  gap: 24,
+  gap: 4,
   zIndex: 10,
 }
 
 const navButtonStyle = {
+  flex: '1 1 0',
+  maxWidth: 100,
   border: 0,
   background: 'transparent',
   color: '#222',
-  fontSize: 15,
+  fontSize: 13,
   cursor: 'pointer',
-  padding: 0,
+  padding: '2px 1px',
+  whiteSpace: 'nowrap' as const,
   fontFamily: 'inherit',
 }
 
