@@ -1,4 +1,5 @@
 import { createClient } from 'npm:@supabase/supabase-js@2'
+import { conceptLabel, normalizeConcepts } from '../_shared/taxonomy.ts'
 
 const KUDAGO_EVENTS_URL = 'https://kudago.com/public-api/v1.4/events/'
 const ALLOWED_LOCATIONS = new Set(['msk', 'spb'])
@@ -365,7 +366,11 @@ function preferenceTerms(value: string) {
     }
   }
 
-  return [...new Set(terms)].slice(0, 30)
+  return [...new Set([...terms, ...normalizeConcepts(value)])].slice(0, 30)
+}
+
+function recommendationCategories(categories: string[]) {
+  return [...new Set([...categories, ...normalizeConcepts(categories)])]
 }
 
 function eventSearchText(event: NormalizedEvent) {
@@ -374,6 +379,7 @@ function eventSearchText(event: NormalizedEvent) {
     event.description,
     event.place_name,
     ...event.categories,
+    ...normalizeConcepts(event.categories),
   ].join(' ').toLocaleLowerCase('ru-RU')
 }
 
@@ -382,7 +388,7 @@ function addCategoryWeight(
   categories: string[],
   weight: number
 ) {
-  for (const category of categories) {
+  for (const category of recommendationCategories(categories)) {
     profile.set(category, (profile.get(category) ?? 0) + weight)
   }
 }
@@ -575,7 +581,7 @@ async function personalizedRecommendations(
         : RECOMMENDATION_WEIGHTS.notInterestedCategory
     addCategoryWeight(signals.categoryAffinity, categories, weight)
     if (reaction === 'wishlist' || reaction === 'interested') {
-      categories.forEach((category) => signals.positiveFeedbackCategories.add(category))
+      recommendationCategories(categories).forEach((category) => signals.positiveFeedbackCategories.add(category))
     }
   }
 
@@ -584,7 +590,7 @@ async function personalizedRecommendations(
     if (String(plan.created_by) !== userId) continue
     const categories = historyCatalog.get(String(plan.event_catalog_id))?.categories ?? []
     addCategoryWeight(signals.categoryAffinity, categories, RECOMMENDATION_WEIGHTS.planCategory)
-    categories.forEach((category) => signals.planCategories.add(category))
+    recommendationCategories(categories).forEach((category) => signals.planCategories.add(category))
   }
 
   for (const visited of visitedRows) {
@@ -608,7 +614,7 @@ async function personalizedRecommendations(
             : 0
     addCategoryWeight(signals.categoryAffinity, categories, ratingWeight)
     if (score >= 8) {
-      categories.forEach((category) => signals.highlyRatedCategories.add(category))
+      recommendationCategories(categories).forEach((category) => signals.highlyRatedCategories.add(category))
     }
   }
 
@@ -622,7 +628,8 @@ async function personalizedRecommendations(
         !visitedEventIds.has(event.catalog_id)
     })
     .map((event) => {
-      const categoryScore = event.categories.reduce(
+      const eventCategories = recommendationCategories(event.categories)
+      const categoryScore = eventCategories.reduce(
         (total, category) => total + (signals.categoryAffinity.get(category) ?? 0),
         0
       )
@@ -632,22 +639,25 @@ async function personalizedRecommendations(
         RECOMMENDATION_WEIGHTS.maxKeywordScore
       )
       const reasons: string[] = []
-      const positiveCategory = event.categories.find((category) =>
+      const positiveCategory = eventCategories.find((category) =>
         signals.positiveFeedbackCategories.has(category)
       )
-      const ratedCategory = event.categories.find((category) =>
+      const ratedCategory = eventCategories.find((category) =>
         signals.highlyRatedCategories.has(category)
       )
-      const plannedCategory = event.categories.find((category) =>
+      const plannedCategory = eventCategories.find((category) =>
         signals.planCategories.has(category)
       )
 
       if (ratedCategory) {
-        reasons.push(`Вы высоко оценивали похожие события категории «${ratedCategory}»`)
+        const concept = normalizeConcepts(ratedCategory)[0]
+        reasons.push(`Вы высоко оценивали похожие события категории «${concept ? conceptLabel(concept) : ratedCategory}»`)
       } else if (positiveCategory) {
-        reasons.push(`Вы отмечали события категории «${positiveCategory}» как интересные`)
+        const concept = normalizeConcepts(positiveCategory)[0]
+        reasons.push(`Вы отмечали события категории «${concept ? conceptLabel(concept) : positiveCategory}» как интересные`)
       } else if (plannedCategory) {
-        reasons.push(`Похоже на события категории «${plannedCategory}», которые вы добавляли в планы`)
+        const concept = normalizeConcepts(plannedCategory)[0]
+        reasons.push(`Похоже на события категории «${concept ? conceptLabel(concept) : plannedCategory}», которые вы добавляли в планы`)
       }
       if (matchedTerms.length > 0) {
         reasons.push(`Совпадает с вашими предпочтениями: ${matchedTerms.slice(0, 2).join(', ')}`)

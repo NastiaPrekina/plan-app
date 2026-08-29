@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react'
 import type { Session } from '@supabase/supabase-js'
 import { supabase } from './lib/supabase'
+import { displayCategoryValues } from '../supabase/functions/_shared/taxonomy'
 
 type Plan = {
   id: string
   event_catalog_id?: string | null
+  place_catalog_id?: string | null
   title: string
   type: string
   price: string
@@ -54,11 +56,13 @@ type AppView =
   | 'home'
   | 'recommendations'
   | 'places'
+  | 'calendar'
   | 'ranking'
   | 'discovery'
   | 'group'
   | 'profile'
 type AuthMode = 'login' | 'register'
+type CalendarMode = 'month' | 'list'
 
 type Group = {
   id: string
@@ -109,6 +113,7 @@ type RecommendationEvent = DiscoveryEvent & {
 }
 
 type EventReaction = 'interested' | 'not_interested' | 'wishlist'
+type PlaceReaction = EventReaction
 type OnboardingStep = 'preferences' | 'calibration' | 'complete' | null
 
 type UserPreferences = {
@@ -130,15 +135,34 @@ type DiscoveredPlace = {
   categories: string[]
   cuisine: string[]
   address: string | null
+  locality: string | null
+  region: string | null
+  postcode: string | null
   lat: number | null
   lon: number | null
+  distance_meters: number | null
   website: string | null
   phone: string | null
-  rating: number | null
-  popularity: number | null
-  price_level: number | null
-  opening_hours: unknown | null
+  email: string | null
+  instagram: string | null
+  facebook_id: string | null
+  twitter: string | null
+  chain_id: string | null
+  chain_name: string | null
+  is_chain: boolean
+  store_id: string | null
+  related_places: unknown | null
+  date_closed: string | null
+  unresolved_flags: string[]
   source_url: string | null
+}
+
+type RecommendationPlace = DiscoveredPlace & {
+  catalog_id: string
+  recommendation_score: number
+  reasons: string[]
+  reaction: PlaceReaction | null
+  is_in_plans: boolean
 }
 
 const DISCOVERY_LOCATIONS = [
@@ -157,6 +181,32 @@ const PLACE_KINDS = [
   { kind: 'cafe', label: '☕ Кафе' },
   { kind: 'bar', label: '🍸 Бары' },
 ] as const
+
+function localDateKey(value: Date) {
+  const year = value.getFullYear()
+  const month = String(value.getMonth() + 1).padStart(2, '0')
+  const day = String(value.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+function localTimeValue(value: Date) {
+  return `${String(value.getHours()).padStart(2, '0')}:${String(value.getMinutes()).padStart(2, '0')}`
+}
+
+function formatCalendarDate(value: Date) {
+  const todayDate = new Date()
+  const tomorrowDate = new Date(todayDate.getFullYear(), todayDate.getMonth(), todayDate.getDate() + 1)
+  const today = localDateKey(todayDate)
+  const tomorrow = localDateKey(tomorrowDate)
+  const key = localDateKey(value)
+  if (key === today) return 'Сегодня'
+  if (key === tomorrow) return 'Завтра'
+  return value.toLocaleDateString('ru-RU', {
+    day: 'numeric',
+    month: 'long',
+    year: value.getFullYear() === new Date().getFullYear() ? undefined : 'numeric',
+  })
+}
 
 function App() {
   const [session, setSession] = useState<Session | null>(null)
@@ -230,12 +280,41 @@ function App() {
   const [recommendationsOffset, setRecommendationsOffset] = useState(0)
   const [recommendationsFeedbackCount, setRecommendationsFeedbackCount] =
     useState(0)
+  const [placeRecommendations, setPlaceRecommendations] =
+    useState<RecommendationPlace[]>([])
+  const [placeRecommendationsLoading, setPlaceRecommendationsLoading] = useState(false)
+  const [placeRecommendationsSearched, setPlaceRecommendationsSearched] = useState(false)
+  const [placeRecommendationsError, setPlaceRecommendationsError] = useState('')
+  const [placeRecommendationsOffset, setPlaceRecommendationsOffset] = useState(0)
+  const [placeRecommendationsFeedbackCount, setPlaceRecommendationsFeedbackCount] =
+    useState(0)
   const [placeKind, setPlaceKind] = useState<PlaceKind>('restaurant')
   const [placeCity, setPlaceCity] = useState('')
   const [places, setPlaces] = useState<DiscoveredPlace[]>([])
   const [placesLoading, setPlacesLoading] = useState(false)
   const [placesSearched, setPlacesSearched] = useState(false)
   const [placesError, setPlacesError] = useState('')
+  const [placeFeedback, setPlaceFeedback] = useState<Record<string, PlaceReaction>>({})
+  const [placeFeedbackBusy, setPlaceFeedbackBusy] = useState('')
+  const [placeFeedbackError, setPlaceFeedbackError] = useState('')
+  const [showHiddenPlaces, setShowHiddenPlaces] = useState(false)
+  const [placePlanBusy, setPlacePlanBusy] = useState('')
+  const [placePlanMessage, setPlacePlanMessage] = useState('')
+  const [placePlanError, setPlacePlanError] = useState('')
+  const [calendarMode, setCalendarMode] = useState<CalendarMode>('month')
+  const [calendarMonth, setCalendarMonth] = useState(
+    () => new Date(new Date().getFullYear(), new Date().getMonth(), 1)
+  )
+  const [selectedCalendarDate, setSelectedCalendarDate] = useState(
+    () => localDateKey(new Date())
+  )
+  const [showPastCalendarEvents, setShowPastCalendarEvents] = useState(false)
+  const [editingCalendarEvent, setEditingCalendarEvent] = useState<PlanEvent | null>(null)
+  const [calendarEditDate, setCalendarEditDate] = useState('')
+  const [calendarEditTime, setCalendarEditTime] = useState('')
+  const [calendarEditComment, setCalendarEditComment] = useState('')
+  const [calendarEventBusy, setCalendarEventBusy] = useState(false)
+  const [calendarError, setCalendarError] = useState('')
 
   const [plans, setPlans] = useState<Plan[]>([])
   const [planEvents, setPlanEvents] = useState<PlanEvent[]>([])
@@ -338,9 +417,20 @@ function App() {
       setRecommendationsSearched(false)
       setRecommendationsOffset(0)
       setRecommendationsFeedbackCount(0)
+      setPlaceRecommendations([])
+      setPlaceRecommendationsSearched(false)
+      setPlaceRecommendationsOffset(0)
+      setPlaceRecommendationsFeedbackCount(0)
       setPlaces([])
       setPlacesSearched(false)
       setPlaceCity('')
+      setPlaceFeedback({})
+      setPlaceFeedbackBusy('')
+      setPlaceFeedbackError('')
+      setShowHiddenPlaces(false)
+      setPlacePlanBusy('')
+      setPlacePlanMessage('')
+      setPlacePlanError('')
       setSelectedPlan(null)
       setEditingPlan(null)
       setSchedulingPlan(null)
@@ -959,6 +1049,60 @@ function App() {
     setRecommendationsLoading(false)
   }
 
+  async function loadPersonalizedPlaces(offset: number) {
+    if (!session || placeRecommendationsLoading) return
+
+    setPlaceRecommendationsLoading(true)
+    setPlaceRecommendationsSearched(true)
+    setPlaceRecommendationsError('')
+    setPlaceFeedbackError('')
+    setPlacePlanError('')
+    setPlacePlanMessage('')
+
+    const { data, error } = await supabase.functions.invoke('place-discovery', {
+      body: {
+        action: 'personalized_places',
+        limit: 8,
+        offset,
+      },
+    })
+
+    if (error) {
+      setPlaceRecommendations([])
+      setPlaceRecommendationsError(await getEdgeFunctionErrorMessage(error))
+      setPlaceRecommendationsLoading(false)
+      return
+    }
+
+    const foundPlaces = Array.isArray(data?.recommendations)
+      ? data.recommendations as RecommendationPlace[]
+      : []
+    setPlaceRecommendations(foundPlaces)
+    setPlaceRecommendationsFeedbackCount(Number(data?.feedback_count) || 0)
+    setPlaceRecommendationsOffset(offset + 8)
+    setPlaceFeedback((current) => {
+      const next = { ...current }
+      for (const place of foundPlaces) {
+        if (
+          place.reaction === 'interested' ||
+          place.reaction === 'not_interested' ||
+          place.reaction === 'wishlist'
+        ) {
+          next[place.catalog_id] = place.reaction
+        } else {
+          delete next[place.catalog_id]
+        }
+      }
+      return next
+    })
+    setPlaceRecommendationsLoading(false)
+  }
+
+  function loadAllRecommendations() {
+    void loadPersonalizedRecommendations(recommendationsOffset)
+    void loadPersonalizedPlaces(placeRecommendationsOffset)
+  }
+
   async function searchPlaces() {
     if (!session || placesLoading) return
 
@@ -971,6 +1115,9 @@ function App() {
     setPlacesLoading(true)
     setPlacesSearched(true)
     setPlacesError('')
+    setPlaceFeedbackError('')
+    setPlacePlanMessage('')
+    setPlacePlanError('')
     const { data, error } = await supabase.functions.invoke('place-discovery', {
       body: {
         action: 'search_places',
@@ -987,8 +1134,189 @@ function App() {
       return
     }
 
-    setPlaces(Array.isArray(data?.places) ? data.places as DiscoveredPlace[] : [])
+    const foundPlaces = Array.isArray(data?.places)
+      ? data.places as DiscoveredPlace[]
+      : []
+    setPlaces(foundPlaces)
+    await loadPlaceFeedback(foundPlaces)
     setPlacesLoading(false)
+  }
+
+  async function loadPlaceFeedback(foundPlaces: DiscoveredPlace[]) {
+    if (!session) return
+
+    const placeIds = [...new Set(
+      foundPlaces
+        .map((place) => place.catalog_id)
+        .filter((placeId): placeId is string => Boolean(placeId))
+    )]
+
+    if (placeIds.length === 0) {
+      setPlaceFeedback({})
+      return
+    }
+
+    const { data, error } = await supabase
+      .from('place_feedback')
+      .select('place_id, reaction')
+      .eq('user_id', session.user.id)
+      .in('place_id', placeIds)
+
+    if (error) {
+      console.error('Ошибка загрузки реакций на места:', error)
+      setPlaceFeedback({})
+      setPlaceFeedbackError('Не удалось загрузить сохранённые реакции на места.')
+      return
+    }
+
+    const feedback: Record<string, PlaceReaction> = {}
+    for (const row of data ?? []) {
+      if (
+        row.reaction === 'interested' ||
+        row.reaction === 'not_interested' ||
+        row.reaction === 'wishlist'
+      ) {
+        feedback[String(row.place_id)] = row.reaction
+      }
+    }
+    setPlaceFeedback(feedback)
+  }
+
+  async function togglePlaceReaction(placeId: string, reaction: PlaceReaction) {
+    if (!session || placeFeedbackBusy) return
+
+    setPlaceFeedbackBusy(placeId)
+    setPlaceFeedbackError('')
+    const currentReaction = placeFeedback[placeId]
+
+    if (currentReaction === reaction) {
+      setPlaceFeedback((current) => {
+        const next = { ...current }
+        delete next[placeId]
+        return next
+      })
+
+      const { error } = await supabase
+        .from('place_feedback')
+        .delete()
+        .eq('user_id', session.user.id)
+        .eq('place_id', placeId)
+
+      if (error) {
+        console.error('Ошибка удаления реакции на место:', error)
+        setPlaceFeedbackError('Не удалось снять реакцию.')
+        setPlaceFeedback((current) => ({ ...current, [placeId]: currentReaction }))
+      }
+      setPlaceFeedbackBusy('')
+      return
+    }
+
+    setPlaceFeedback((current) => ({ ...current, [placeId]: reaction }))
+    const { error } = await supabase
+      .from('place_feedback')
+      .upsert(
+        { user_id: session.user.id, place_id: placeId, reaction },
+        { onConflict: 'user_id,place_id' }
+      )
+
+    if (error) {
+      console.error('Ошибка сохранения реакции на место:', error)
+      setPlaceFeedbackError('Не удалось сохранить реакцию.')
+      setPlaceFeedback((current) => {
+        const next = { ...current }
+        if (currentReaction) next[placeId] = currentReaction
+        else delete next[placeId]
+        return next
+      })
+    }
+    setPlaceFeedbackBusy('')
+  }
+
+  async function addPlaceToPlans(place: DiscoveredPlace) {
+    if (!session || !activeGroup || !place.catalog_id || placePlanBusy) return
+
+    setPlacePlanBusy(place.catalog_id)
+    setPlacePlanMessage('')
+    setPlacePlanError('')
+
+    const { data: existingPlan, error: checkError } = await supabase
+      .from('plans')
+      .select('id')
+      .eq('group_id', activeGroup.id)
+      .eq('place_catalog_id', place.catalog_id)
+      .maybeSingle()
+
+    if (checkError) {
+      console.error('Ошибка проверки места в планах:', checkError)
+      setPlacePlanError('Не удалось проверить список планов.')
+      setPlacePlanBusy('')
+      return
+    }
+
+    if (existingPlan) {
+      await loadAppData(activeGroup.id)
+      setPlacePlanError('Это место уже добавлено в планы.')
+      setPlacePlanBusy('')
+      return
+    }
+
+    const kindLabels: Record<PlaceKind, string> = {
+      restaurant: 'Ресторан',
+      cafe: 'Кафе',
+      bar: 'Бар',
+    }
+    const tags = [...new Set([...place.cuisine, ...place.categories])]
+    const noteParts: string[] = []
+    if (place.cuisine.length > 0) noteParts.push(`Кухня: ${place.cuisine.join(', ')}`)
+    if (place.categories.length > 0) {
+      noteParts.push(`Категории: ${place.categories.join(', ')}`)
+    }
+
+    const { data, error } = await supabase
+      .from('plans')
+      .insert({
+        place_catalog_id: place.catalog_id,
+        title: place.name,
+        type: kindLabels[place.kind],
+        price: '',
+        address: place.address ?? '',
+        link: place.source_url || place.website || '',
+        note: noteParts.join('. '),
+        tags,
+        created_by: session.user.id,
+        group_id: activeGroup.id,
+      })
+      .select()
+      .single()
+
+    if (error) {
+      if (error.code === '23505') {
+        await loadAppData(activeGroup.id)
+        setPlacePlanError('Это место уже добавлено в планы.')
+      } else {
+        console.error('Ошибка добавления места в планы:', error)
+        setPlacePlanError('Не удалось добавить место в планы.')
+      }
+      setPlacePlanBusy('')
+      return
+    }
+
+    const addedPlan: Plan = {
+      id: String(data.id),
+      event_catalog_id: data.event_catalog_id ? String(data.event_catalog_id) : null,
+      place_catalog_id: String(data.place_catalog_id),
+      title: data.title ?? '',
+      type: data.type ?? 'Другое',
+      price: data.price ?? '',
+      address: data.address ?? '',
+      link: data.link ?? '',
+      note: data.note ?? '',
+      tags: Array.isArray(data.tags) ? data.tags : [],
+      created_at: data.created_at ?? undefined,
+    }
+    setPlans((current) => [addedPlan, ...current])
+    setPlacePlanMessage('Добавлено в Мои планы.')
+    setPlacePlanBusy('')
   }
 
   function navigateTo(view: AppView) {
@@ -1001,6 +1329,7 @@ function App() {
       !recommendationsLoading
     ) {
       void loadPersonalizedRecommendations(0)
+      void loadPersonalizedPlaces(0)
     }
   }
 
@@ -1507,6 +1836,9 @@ function App() {
       event_catalog_id: plan.event_catalog_id
         ? String(plan.event_catalog_id)
         : null,
+      place_catalog_id: plan.place_catalog_id
+        ? String(plan.place_catalog_id)
+        : null,
       title: plan.title ?? '',
       type: plan.type ?? 'Другое',
       price: plan.price ?? 'Цена не указана',
@@ -1714,6 +2046,9 @@ function App() {
       event_catalog_id: data.event_catalog_id
         ? String(data.event_catalog_id)
         : null,
+      place_catalog_id: data.place_catalog_id
+        ? String(data.place_catalog_id)
+        : null,
       title: data.title ?? '',
       type: data.type ?? 'Другое',
       price: data.price ?? 'Цена не указана',
@@ -1796,6 +2131,9 @@ function App() {
       event_catalog_id: data.event_catalog_id
         ? String(data.event_catalog_id)
         : editingPlan.event_catalog_id ?? null,
+      place_catalog_id: data.place_catalog_id
+        ? String(data.place_catalog_id)
+        : editingPlan.place_catalog_id ?? null,
       title: data.title ?? '',
       type: data.type ?? 'Другое',
       price: data.price ?? 'Цена не указана',
@@ -1895,6 +2233,105 @@ function App() {
     setScheduleTime('')
     setScheduleComment('')
     setSaving(false)
+  }
+
+  function openCalendarEventEditor(event: PlanEvent) {
+    const plannedAt = new Date(event.planned_at)
+    setEditingCalendarEvent(event)
+    setCalendarEditDate(localDateKey(plannedAt))
+    setCalendarEditTime(localTimeValue(plannedAt))
+    setCalendarEditComment(event.comment)
+    setCalendarError('')
+  }
+
+  function closeCalendarEventEditor() {
+    if (calendarEventBusy) return
+    setEditingCalendarEvent(null)
+    setCalendarError('')
+  }
+
+  async function saveCalendarEvent() {
+    if (!editingCalendarEvent || !calendarEditDate || !calendarEditTime) return
+    const localDateTime = new Date(`${calendarEditDate}T${calendarEditTime}:00`)
+    if (Number.isNaN(localDateTime.getTime())) {
+      setCalendarError('Не удалось определить дату и время.')
+      return
+    }
+
+    setCalendarEventBusy(true)
+    setCalendarError('')
+    const { data, error } = await supabase
+      .from('plan_events')
+      .update({
+        planned_at: localDateTime.toISOString(),
+        comment: calendarEditComment.trim(),
+      })
+      .eq('id', editingCalendarEvent.id)
+      .eq('plan_id', editingCalendarEvent.plan_id)
+      .select()
+      .single()
+
+    if (error) {
+      console.error('Ошибка изменения похода:', error)
+      setCalendarError('Не удалось изменить поход. Проверьте права доступа и попробуйте ещё раз.')
+      setCalendarEventBusy(false)
+      return
+    }
+
+    const updatedEvent: PlanEvent = {
+      id: String(data.id),
+      plan_id: String(data.plan_id),
+      planned_at: data.planned_at,
+      comment: data.comment ?? '',
+      status: data.status ?? editingCalendarEvent.status,
+      created_at: data.created_at ?? editingCalendarEvent.created_at,
+    }
+    setPlanEvents((events) => events
+      .map((event) => event.id === updatedEvent.id ? updatedEvent : event)
+      .sort((a, b) => Date.parse(a.planned_at) - Date.parse(b.planned_at)))
+    setSelectedCalendarDate(localDateKey(new Date(updatedEvent.planned_at)))
+    setCalendarMonth(new Date(
+      new Date(updatedEvent.planned_at).getFullYear(),
+      new Date(updatedEvent.planned_at).getMonth(),
+      1
+    ))
+    setEditingCalendarEvent(null)
+    setCalendarEventBusy(false)
+  }
+
+  async function cancelCalendarEvent() {
+    if (!editingCalendarEvent || calendarEventBusy) return
+    const confirmed = window.confirm('Отменить этот поход? Сам план останется в «Моих планах».')
+    if (!confirmed) return
+
+    setCalendarEventBusy(true)
+    setCalendarError('')
+    const { error } = await supabase
+      .from('plan_events')
+      .delete()
+      .eq('id', editingCalendarEvent.id)
+      .eq('plan_id', editingCalendarEvent.plan_id)
+
+    if (error) {
+      console.error('Ошибка отмены похода:', error)
+      setCalendarError('Не удалось отменить поход. Проверьте права доступа и попробуйте ещё раз.')
+      setCalendarEventBusy(false)
+      return
+    }
+
+    const removedId = editingCalendarEvent.id
+    setPlanEvents((events) => events.filter((event) => event.id !== removedId))
+    setEventRatings((ratings) => ratings.filter((rating) => rating.plan_event_id !== removedId))
+    setEventRatingSummaries((summaries) =>
+      summaries.filter((summary) => summary.entity_id !== removedId)
+    )
+    setEditingCalendarEvent(null)
+    setCalendarEventBusy(false)
+  }
+
+  function openPlanFromCalendar(plan: Plan) {
+    setActiveView('home')
+    setSelectedPlan(plan)
   }
 
   function formatPlannedAt(value: string) {
@@ -2692,8 +3129,277 @@ function App() {
     )
   }
 
+  if (activeView === 'calendar') {
+    const todayKey = localDateKey(new Date())
+    const calendarEvents = planEvents
+      .filter((event) => plans.some((plan) => plan.id === event.plan_id))
+      .sort((a, b) => Date.parse(a.planned_at) - Date.parse(b.planned_at))
+    const eventsForDate = (dateKey: string) => calendarEvents.filter(
+      (event) => localDateKey(new Date(event.planned_at)) === dateKey
+    )
+    const monthStart = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth(), 1)
+    const gridStart = new Date(
+      monthStart.getFullYear(),
+      monthStart.getMonth(),
+      1 - ((monthStart.getDay() + 6) % 7)
+    )
+    const monthDays = Array.from({ length: 42 }, (_, index) => new Date(
+      gridStart.getFullYear(), gridStart.getMonth(), gridStart.getDate() + index
+    ))
+    const selectedDayEvents = eventsForDate(selectedCalendarDate)
+    const visibleListEvents = calendarEvents.filter(
+      (event) => showPastCalendarEvents || Date.parse(event.planned_at) >= now
+    )
+    const listGroups = new Map<string, PlanEvent[]>()
+    visibleListEvents.forEach((event) => {
+      const key = localDateKey(new Date(event.planned_at))
+      listGroups.set(key, [...(listGroups.get(key) ?? []), event])
+    })
+    const changeCalendarMonth = (offset: number) => {
+      const nextMonth = new Date(
+        calendarMonth.getFullYear(), calendarMonth.getMonth() + offset, 1
+      )
+      setCalendarMonth(nextMonth)
+      setSelectedCalendarDate(localDateKey(nextMonth))
+    }
+
+    return (
+      <div style={pageContainerStyle}>
+        <UserBar
+          email={userEmail}
+          displayName={userDisplayName}
+          groupName={activeGroup.name}
+          canEditGroup={activeGroupRole === 'owner'}
+          busy={authBusy}
+          onOpenProfile={() => setActiveView('profile')}
+          onOpenGroup={() => setActiveView('group')}
+          onLogout={handleSignOut}
+        />
+
+        <h1 style={pageTitleStyle}>📅 Календарь</h1>
+        <p style={pageDescriptionStyle}>Общие планы группы «{activeGroup.name}».</p>
+
+        <div style={calendarModeStyle}>
+          {(['month', 'list'] as CalendarMode[]).map((mode) => (
+            <button
+              key={mode}
+              type="button"
+              onClick={() => setCalendarMode(mode)}
+              style={{
+                ...calendarModeButtonStyle,
+                ...(calendarMode === mode ? calendarModeButtonActiveStyle : {}),
+              }}
+            >
+              {mode === 'month' ? 'Месяц' : 'Список'}
+            </button>
+          ))}
+        </div>
+
+        {calendarEvents.length === 0 ? (
+          <div style={calendarEmptyStyle}>
+            <div style={{ fontSize: 32 }}>📅</div>
+            <h2 style={{ ...sectionTitleStyle, marginTop: 12 }}>
+              Пока ничего не запланировано
+            </h2>
+            <p style={{ ...pageDescriptionStyle, marginBottom: 16 }}>
+              Когда кто-нибудь из группы нажмёт «✅ Идём» у плана, он появится здесь.
+            </p>
+            <button
+              type="button"
+              onClick={() => setActiveView('home')}
+              style={mainButtonStyle}
+            >
+              Перейти в Мои планы
+            </button>
+          </div>
+        ) : calendarMode === 'month' ? (
+          <>
+            <div style={calendarMonthHeaderStyle}>
+              <button
+                type="button"
+                aria-label="Предыдущий месяц"
+                onClick={() => changeCalendarMonth(-1)}
+                style={calendarArrowStyle}
+              >‹</button>
+              <strong>{calendarMonth.toLocaleDateString('ru-RU', {
+                month: 'long', year: 'numeric',
+              })}</strong>
+              <button
+                type="button"
+                aria-label="Следующий месяц"
+                onClick={() => changeCalendarMonth(1)}
+                style={calendarArrowStyle}
+              >›</button>
+            </div>
+            <div style={calendarGridStyle}>
+              {['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'].map((weekday) => (
+                <div key={weekday} style={calendarWeekdayStyle}>{weekday}</div>
+              ))}
+              {monthDays.map((date) => {
+                const key = localDateKey(date)
+                const count = eventsForDate(key).length
+                const isCurrentMonth = date.getMonth() === calendarMonth.getMonth()
+                const isSelected = key === selectedCalendarDate
+                const isToday = key === todayKey
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => setSelectedCalendarDate(key)}
+                    style={{
+                      ...calendarDayStyle,
+                      opacity: isCurrentMonth ? 1 : 0.38,
+                      ...(isSelected ? calendarDaySelectedStyle : {}),
+                      ...(isToday ? calendarTodayStyle : {}),
+                    }}
+                  >
+                    <span>{date.getDate()}</span>
+                    {count > 0 && <span style={calendarMarkerStyle}>• {count}</span>}
+                  </button>
+                )
+              })}
+            </div>
+
+            <h2 style={{ ...sectionTitleStyle, marginTop: 24 }}>
+              {formatCalendarDate(new Date(`${selectedCalendarDate}T12:00:00`))}
+            </h2>
+            {selectedDayEvents.length === 0 ? (
+              <div style={emptyRankingStyle}>На этот день ничего не запланировано</div>
+            ) : (
+              <div style={calendarEventListStyle}>
+                {selectedDayEvents.map((event) => {
+                  const plan = plans.find((item) => item.id === event.plan_id)
+                  return plan ? (
+                    <CalendarEventCard
+                      key={event.id}
+                      event={event}
+                      plan={plan}
+                      onOpenPlan={() => openPlanFromCalendar(plan)}
+                      onEdit={() => openCalendarEventEditor(event)}
+                    />
+                  ) : null
+                })}
+              </div>
+            )}
+          </>
+        ) : (
+          <>
+            <button
+              type="button"
+              onClick={() => setShowPastCalendarEvents((current) => !current)}
+              aria-pressed={showPastCalendarEvents}
+              style={discoveryHiddenToggleStyle}
+            >
+              {showPastCalendarEvents ? 'Скрыть прошедшие' : 'Показать прошедшие'}
+            </button>
+            {listGroups.size === 0 ? (
+              <div style={{ ...emptyRankingStyle, marginTop: 18 }}>
+                Ближайших событий пока нет
+              </div>
+            ) : (
+              <div style={{ marginTop: 20 }}>
+                {[...listGroups.entries()].map(([key, events]) => (
+                  <section key={key} style={{ marginBottom: 24 }}>
+                    <h2 style={calendarListDateStyle}>
+                      {formatCalendarDate(new Date(`${key}T12:00:00`))}
+                    </h2>
+                    <div style={calendarEventListStyle}>
+                      {events.map((event) => {
+                        const plan = plans.find((item) => item.id === event.plan_id)
+                        return plan ? (
+                          <CalendarEventCard
+                            key={event.id}
+                            event={event}
+                            plan={plan}
+                            onOpenPlan={() => openPlanFromCalendar(plan)}
+                            onEdit={() => openCalendarEventEditor(event)}
+                          />
+                        ) : null
+                      })}
+                    </div>
+                  </section>
+                ))}
+              </div>
+            )}
+          </>
+        )}
+
+        {editingCalendarEvent && (
+          <div style={overlayStyle} onClick={closeCalendarEventEditor}>
+            <div style={overlayPanelStyle} onClick={(event) => event.stopPropagation()}>
+              <h2 style={sheetTitleStyle}>Изменить поход</h2>
+              <label style={fieldLabelStyle}>Дата</label>
+              <input
+                type="date"
+                value={calendarEditDate}
+                onChange={(event) => setCalendarEditDate(event.target.value)}
+                disabled={calendarEventBusy}
+                style={inputStyle}
+              />
+              <label style={fieldLabelStyle}>Время</label>
+              <input
+                type="time"
+                value={calendarEditTime}
+                onChange={(event) => setCalendarEditTime(event.target.value)}
+                disabled={calendarEventBusy}
+                style={inputStyle}
+              />
+              <label style={fieldLabelStyle}>Комментарий</label>
+              <textarea
+                value={calendarEditComment}
+                onChange={(event) => setCalendarEditComment(event.target.value)}
+                disabled={calendarEventBusy}
+                style={{ ...inputStyle, minHeight: 90, resize: 'vertical' }}
+              />
+              {calendarError && <div style={authErrorStyle}>{calendarError}</div>}
+              <button
+                type="button"
+                onClick={() => void saveCalendarEvent()}
+                disabled={calendarEventBusy || !calendarEditDate || !calendarEditTime}
+                style={{ ...mainButtonStyle, marginTop: 18 }}
+              >
+                {calendarEventBusy ? 'Сохраняю…' : 'Сохранить'}
+              </button>
+              <button
+                type="button"
+                onClick={() => void cancelCalendarEvent()}
+                disabled={calendarEventBusy}
+                style={{ ...dangerButtonStyle, marginTop: 10 }}
+              >
+                Отменить поход
+              </button>
+              <button
+                type="button"
+                onClick={closeCalendarEventEditor}
+                disabled={calendarEventBusy}
+                style={{ ...secondaryButtonStyle, marginTop: 10 }}
+              >
+                Закрыть
+              </button>
+            </div>
+          </div>
+        )}
+
+        <BottomNavigation
+          activeView={activeView}
+          onNavigate={navigateTo}
+          onAdd={() => {
+            setActiveView('home')
+            setShowAddForm(true)
+          }}
+        />
+      </div>
+    )
+  }
+
   if (activeView === 'places') {
     const effectivePlaceCity = placeCity || userPreferences?.city || ''
+    const visiblePlaces = places.filter(
+      (place) =>
+        showHiddenPlaces ||
+        !place.catalog_id ||
+        placeFeedback[place.catalog_id] !== 'not_interested'
+    )
 
     return (
       <div style={pageContainerStyle}>
@@ -2768,20 +3474,52 @@ function App() {
           >
             {placesLoading ? 'Ищу…' : 'Найти места'}
           </button>
+
+          <button
+            type="button"
+            onClick={() => setShowHiddenPlaces((current) => !current)}
+            aria-pressed={showHiddenPlaces}
+            style={discoveryHiddenToggleStyle}
+          >
+            {showHiddenPlaces ? 'Скрыть отмеченные «Не моё»' : 'Показать скрытые'}
+          </button>
         </div>
 
         {placesError && <div style={authErrorStyle}>{placesError}</div>}
+        {placeFeedbackError && <div style={authErrorStyle}>{placeFeedbackError}</div>}
+        {placePlanError && <div style={authErrorStyle}>{placePlanError}</div>}
+        {placePlanMessage && <div style={authSuccessStyle}>{placePlanMessage}</div>}
 
         {!placesLoading && placesSearched && !placesError && places.length === 0 && (
           <div style={emptyRankingStyle}>Подходящие места не найдены.</div>
         )}
 
-        {!placesLoading && places.length > 0 && (
+        {!placesLoading && places.length > 0 && visiblePlaces.length === 0 && (
+          <div style={emptyRankingStyle}>
+            Все найденные места скрыты. Включите «Показать скрытые».
+          </div>
+        )}
+
+        {!placesLoading && visiblePlaces.length > 0 && (
           <div style={placeListStyle}>
-            {places.map((place) => (
+            {visiblePlaces.map((place) => (
               <PlaceCard
                 key={`${place.source}:${place.source_place_id}`}
                 place={place}
+                reaction={place.catalog_id ? placeFeedback[place.catalog_id] : undefined}
+                feedbackBusy={Boolean(
+                  place.catalog_id && placeFeedbackBusy === place.catalog_id
+                )}
+                planBusy={Boolean(place.catalog_id && placePlanBusy === place.catalog_id)}
+                alreadyAdded={Boolean(
+                  place.catalog_id && plans.some(
+                    (plan) => plan.place_catalog_id === place.catalog_id
+                  )
+                )}
+                onReaction={(reaction) => {
+                  if (place.catalog_id) void togglePlaceReaction(place.catalog_id, reaction)
+                }}
+                onAddToPlans={() => void addPlaceToPlans(place)}
               />
             ))}
           </div>
@@ -2803,6 +3541,10 @@ function App() {
     const visibleRecommendations = recommendations.filter(
       (event) => discoveryFeedback[event.catalog_id] !== 'not_interested'
     )
+    const visiblePlaceRecommendations = placeRecommendations.filter(
+      (place) => placeFeedback[place.catalog_id] !== 'not_interested'
+    )
+    const recommendationsBusy = recommendationsLoading || placeRecommendationsLoading
 
     return (
       <div style={pageContainerStyle}>
@@ -2844,19 +3586,19 @@ function App() {
             )}
 
             <button
-              onClick={() => void loadPersonalizedRecommendations(recommendationsOffset)}
-              disabled={recommendationsLoading}
+              onClick={loadAllRecommendations}
+              disabled={recommendationsBusy}
               style={{
                 ...mainButtonStyle,
                 marginBottom: 18,
-                opacity: recommendationsLoading ? 0.6 : 1,
+                opacity: recommendationsBusy ? 0.6 : 1,
               }}
             >
-              {recommendationsLoading
+              {recommendationsBusy
                 ? 'Подбираю…'
-                : recommendationsSearched
+                : recommendationsSearched || placeRecommendationsSearched
                   ? '✨ Подобрать ещё'
-                  : '✨ Подобрать мероприятия'}
+                  : '✨ Подобрать рекомендации'}
             </button>
 
             {recommendationsError && (
@@ -2871,6 +3613,20 @@ function App() {
             {discoveryPlanMessage && (
               <div style={authSuccessStyle}>{discoveryPlanMessage}</div>
             )}
+            {placeRecommendationsError && (
+              <div style={authErrorStyle}>{placeRecommendationsError}</div>
+            )}
+            {placeFeedbackError && (
+              <div style={authErrorStyle}>{placeFeedbackError}</div>
+            )}
+            {placePlanError && (
+              <div style={authErrorStyle}>{placePlanError}</div>
+            )}
+            {placePlanMessage && (
+              <div style={authSuccessStyle}>{placePlanMessage}</div>
+            )}
+
+            <h2 style={sectionTitleStyle}>🎟 Мероприятия для вас</h2>
 
             {!recommendationsLoading &&
               recommendationsSearched &&
@@ -2906,13 +3662,55 @@ function App() {
                 })}
               </div>
             )}
+
+            <h2 style={{ ...sectionTitleStyle, marginTop: 28 }}>🍽 Места для вас</h2>
+            {placeRecommendationsFeedbackCount < 5 && (
+              <div style={recommendationHintStyle}>
+                Чем больше вы оцениваете места, тем точнее становятся рекомендации.
+              </div>
+            )}
+
+            {!placeRecommendationsLoading &&
+              placeRecommendationsSearched &&
+              !placeRecommendationsError &&
+              visiblePlaceRecommendations.length === 0 && (
+                <div style={emptyRankingStyle}>
+                  Пока не удалось найти подходящие места в вашем городе.
+                </div>
+              )}
+
+            {!placeRecommendationsLoading && visiblePlaceRecommendations.length > 0 && (
+              <div style={placeListStyle}>
+                {visiblePlaceRecommendations.map((place) => (
+                  <PlaceCard
+                    key={place.catalog_id}
+                    place={place}
+                    reaction={placeFeedback[place.catalog_id]}
+                    reasons={place.reasons}
+                    feedbackBusy={placeFeedbackBusy === place.catalog_id}
+                    planBusy={placePlanBusy === place.catalog_id}
+                    alreadyAdded={place.is_in_plans || plans.some(
+                      (plan) => plan.place_catalog_id === place.catalog_id
+                    )}
+                    onReaction={(reaction) =>
+                      void togglePlaceReaction(place.catalog_id, reaction)
+                    }
+                    onAddToPlans={() => void addPlaceToPlans(place)}
+                  />
+                ))}
+              </div>
+            )}
           </>
         )}
 
         <div style={discoverySourceStyle}>
-          Источник данных:{' '}
+          Источники данных:{' '}
           <a href="https://kudago.com/" target="_blank" rel="noreferrer">
             KudaGo
+          </a>
+          {' · '}
+          <a href="https://foursquare.com/" target="_blank" rel="noreferrer">
+            Foursquare
           </a>
         </div>
 
@@ -4983,41 +5781,118 @@ function DiscoveryEventCard({
   )
 }
 
-function PlaceCard({ place }: { place: DiscoveredPlace }) {
+function CalendarEventCard({
+  event,
+  plan,
+  onOpenPlan,
+  onEdit,
+}: {
+  event: PlanEvent
+  plan: Plan
+  onOpenPlan: () => void
+  onEdit: () => void
+}) {
+  const plannedAt = new Date(event.planned_at)
+  const typeLabel = plan.event_catalog_id
+    ? 'Мероприятие'
+    : plan.place_catalog_id
+      ? plan.type
+      : plan.type
+
+  return (
+    <article style={calendarEventCardStyle}>
+      <button type="button" onClick={onOpenPlan} style={calendarEventOpenStyle}>
+        <div style={calendarEventTimeStyle}>
+          {plannedAt.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}
+        </div>
+        <div style={calendarEventTypeStyle}>{typeLabel}</div>
+        <h3 style={calendarEventTitleStyle}>{plan.title}</h3>
+        {plan.address && <div style={calendarEventMetaStyle}>📍 {plan.address}</div>}
+        {event.comment && <div style={calendarEventMetaStyle}>💬 {event.comment}</div>}
+      </button>
+      <button type="button" onClick={onEdit} style={calendarEditButtonStyle}>
+        ✏️ Изменить
+      </button>
+    </article>
+  )
+}
+
+function PlaceCard({
+  place,
+  reaction,
+  reasons,
+  feedbackBusy,
+  planBusy,
+  alreadyAdded,
+  onReaction,
+  onAddToPlans,
+}: {
+  place: DiscoveredPlace
+  reaction?: PlaceReaction
+  reasons?: string[]
+  feedbackBusy: boolean
+  planBusy: boolean
+  alreadyAdded: boolean
+  onReaction: (reaction: PlaceReaction) => void
+  onAddToPlans: () => void
+}) {
+  const displayCategories = displayCategoryValues(place.categories)
+  const displayCuisine = displayCategoryValues(place.cuisine)
+  const kindLabel = place.kind === 'restaurant'
+    ? 'Ресторан'
+    : place.kind === 'cafe'
+      ? 'Кафе'
+      : 'Бар'
   const sourceName = place.source === 'foursquare'
     ? 'Foursquare'
     : place.source
   const phoneHref = place.phone
     ? `tel:${place.phone.replace(/[^+\d]/g, '')}`
     : null
+  const instagramHref = place.instagram
+    ? place.instagram.startsWith('http')
+      ? place.instagram
+      : `https://www.instagram.com/${place.instagram.replace(/^@/, '')}`
+    : null
+  const twitterHref = place.twitter
+    ? place.twitter.startsWith('http')
+      ? place.twitter
+      : `https://x.com/${place.twitter.replace(/^@/, '')}`
+    : null
 
   return (
     <article style={placeCardStyle}>
+      {reaction === 'not_interested' && (
+        <div style={discoveryHiddenBadgeStyle}>👎 Не моё</div>
+      )}
       <h2 style={discoveryCardTitleStyle}>{place.name}</h2>
+      <div style={placeDetailStyle}>{kindLabel}</div>
 
-      {place.categories.length > 0 && (
+      {displayCategories.length > 0 && (
         <div style={placeTagListStyle}>
-          {place.categories.map((category) => (
+          {displayCategories.map((category) => (
             <span key={category} style={placeTagStyle}>{category}</span>
           ))}
         </div>
       )}
 
-      {place.cuisine.length > 0 && (
+      {displayCuisine.length > 0 && (
         <div style={placeDetailStyle}>
-          <strong>Кухня:</strong> {place.cuisine.join(', ')}
+          <strong>Кухня:</strong> {displayCuisine.join(', ')}
         </div>
       )}
       {place.address && (
         <div style={placeDetailStyle}>📍 {place.address}</div>
       )}
-      {place.rating !== null && (
-        <div style={placeDetailStyle}>⭐ {place.rating.toFixed(1)}/10</div>
-      )}
-      {place.price_level !== null && (
+      {place.distance_meters !== null && (
         <div style={placeDetailStyle}>
-          Ценовой уровень: {'₽'.repeat(place.price_level)}
+          📏 {place.distance_meters < 1000
+            ? `${Math.round(place.distance_meters)} м`
+            : `${(place.distance_meters / 1000).toFixed(1)} км`}
         </div>
+      )}
+      {place.chain_name && (
+        <div style={placeDetailStyle}>Сеть: {place.chain_name}</div>
       )}
       {place.website && (
         <a
@@ -5032,6 +5907,38 @@ function PlaceCard({ place }: { place: DiscoveredPlace }) {
       {place.phone && phoneHref && (
         <a href={phoneHref} style={placeLinkStyle}>{place.phone}</a>
       )}
+      {place.email && (
+        <a href={`mailto:${place.email}`} style={placeLinkStyle}>{place.email}</a>
+      )}
+      {place.instagram && instagramHref && (
+        <a
+          href={instagramHref}
+          target="_blank"
+          rel="noreferrer"
+          style={placeLinkStyle}
+        >
+          Instagram
+        </a>
+      )}
+      {place.twitter && twitterHref && (
+        <a
+          href={twitterHref}
+          target="_blank"
+          rel="noreferrer"
+          style={placeLinkStyle}
+        >
+          X / Twitter
+        </a>
+      )}
+
+      {reasons && reasons.length > 0 && (
+        <div style={recommendationReasonsStyle}>
+          <div style={recommendationReasonsTitleStyle}>✨ Почему вам подходит</div>
+          {reasons.slice(0, 2).map((reason) => (
+            <div key={reason} style={recommendationReasonStyle}>{reason}</div>
+          ))}
+        </div>
+      )}
       {place.source_url && (
         <a
           href={place.source_url}
@@ -5041,6 +5948,48 @@ function PlaceCard({ place }: { place: DiscoveredPlace }) {
         >
           Подробнее в источнике
         </a>
+      )}
+
+      {place.catalog_id && (
+        <>
+          <div style={discoveryReactionListStyle}>
+            {([
+              ['interested', '👍 Интересно'],
+              ['not_interested', '👎 Не моё'],
+              ['wishlist', '💛 Хочу сходить'],
+            ] as const).map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                onClick={() => onReaction(value)}
+                disabled={feedbackBusy}
+                aria-pressed={reaction === value}
+                style={{
+                  ...discoveryReactionButtonStyle,
+                  ...(reaction === value ? discoveryReactionSelectedStyle : {}),
+                  opacity: feedbackBusy ? 0.6 : 1,
+                }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <button
+            type="button"
+            onClick={onAddToPlans}
+            disabled={alreadyAdded || planBusy}
+            style={{
+              ...discoveryAddPlanButtonStyle,
+              opacity: alreadyAdded || planBusy ? 0.65 : 1,
+            }}
+          >
+            {alreadyAdded
+              ? '✓ Уже в планах'
+              : planBusy
+                ? 'Добавляю…'
+                : '➕ Добавить в планы'}
+          </button>
+        </>
       )}
 
       <div style={placeSourceStyle}>Источник: {sourceName}</div>
@@ -5094,6 +6043,15 @@ function BottomNavigation({
         }}
       >
         🍽 Места
+      </button>
+      <button
+        onClick={() => onNavigate('calendar')}
+        style={{
+          ...navButtonStyle,
+          fontWeight: activeView === 'calendar' ? 700 : 400,
+        }}
+      >
+        📅 Календарь
       </button>
       <button
         onClick={() => onNavigate('ranking')}
@@ -5750,6 +6708,169 @@ const emptyRankingStyle = {
   borderRadius: 16,
   color: '#777',
   textAlign: 'center' as const,
+}
+
+const calendarModeStyle = {
+  display: 'grid',
+  gridTemplateColumns: '1fr 1fr',
+  gap: 8,
+  marginBottom: 20,
+}
+
+const calendarModeButtonStyle = {
+  padding: '11px 8px',
+  border: '1px solid #ddd',
+  borderRadius: 11,
+  background: 'white',
+  color: '#555',
+  cursor: 'pointer',
+  fontFamily: 'inherit',
+}
+
+const calendarModeButtonActiveStyle = {
+  borderColor: '#222',
+  background: '#222',
+  color: 'white',
+  fontWeight: 700,
+}
+
+const calendarEmptyStyle = {
+  padding: '30px 20px',
+  border: '1px dashed #d8d8d8',
+  borderRadius: 18,
+  textAlign: 'center' as const,
+  background: '#fafafa',
+}
+
+const calendarMonthHeaderStyle = {
+  display: 'grid',
+  gridTemplateColumns: '42px 1fr 42px',
+  alignItems: 'center',
+  gap: 8,
+  marginBottom: 12,
+  textAlign: 'center' as const,
+  fontSize: 18,
+  textTransform: 'capitalize' as const,
+}
+
+const calendarArrowStyle = {
+  width: 42,
+  height: 42,
+  border: '1px solid #ddd',
+  borderRadius: 12,
+  background: 'white',
+  color: '#222',
+  fontSize: 26,
+  cursor: 'pointer',
+}
+
+const calendarGridStyle = {
+  display: 'grid',
+  gridTemplateColumns: 'repeat(7, minmax(0, 1fr))',
+  gap: 4,
+}
+
+const calendarWeekdayStyle = {
+  padding: '5px 0 7px',
+  color: '#888',
+  fontSize: 11,
+  textAlign: 'center' as const,
+}
+
+const calendarDayStyle = {
+  minWidth: 0,
+  minHeight: 52,
+  padding: '6px 2px',
+  border: '1px solid transparent',
+  borderRadius: 10,
+  background: '#fafafa',
+  color: '#333',
+  fontFamily: 'inherit',
+  cursor: 'pointer',
+}
+
+const calendarDaySelectedStyle = {
+  borderColor: '#222',
+  background: '#f0f0f0',
+}
+
+const calendarTodayStyle = {
+  boxShadow: 'inset 0 0 0 1px #6b5ca5',
+  fontWeight: 700,
+}
+
+const calendarMarkerStyle = {
+  display: 'block',
+  marginTop: 4,
+  color: '#6b5ca5',
+  fontSize: 11,
+  fontWeight: 700,
+}
+
+const calendarEventListStyle = {
+  display: 'grid',
+  gap: 10,
+}
+
+const calendarListDateStyle = {
+  margin: '0 0 10px',
+  fontSize: 18,
+  textTransform: 'capitalize' as const,
+}
+
+const calendarEventCardStyle = {
+  padding: 15,
+  border: '1px solid #e5e5e5',
+  borderRadius: 15,
+  background: 'white',
+}
+
+const calendarEventOpenStyle = {
+  width: '100%',
+  padding: 0,
+  border: 0,
+  background: 'transparent',
+  color: '#222',
+  textAlign: 'left' as const,
+  cursor: 'pointer',
+  fontFamily: 'inherit',
+}
+
+const calendarEventTimeStyle = {
+  color: '#6b5ca5',
+  fontSize: 15,
+  fontWeight: 700,
+}
+
+const calendarEventTypeStyle = {
+  marginTop: 5,
+  color: '#777',
+  fontSize: 12,
+}
+
+const calendarEventTitleStyle = {
+  margin: '5px 0 0',
+  fontSize: 17,
+  lineHeight: 1.3,
+}
+
+const calendarEventMetaStyle = {
+  marginTop: 7,
+  color: '#555',
+  fontSize: 13,
+  lineHeight: 1.4,
+}
+
+const calendarEditButtonStyle = {
+  marginTop: 12,
+  padding: '7px 10px',
+  border: '1px solid #ddd',
+  borderRadius: 9,
+  background: '#fafafa',
+  color: '#444',
+  cursor: 'pointer',
+  fontFamily: 'inherit',
+  fontSize: 13,
 }
 
 const bottomNavStyle = {
