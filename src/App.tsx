@@ -26,6 +26,7 @@ type PlanEvent = {
 type PlanDesire = {
   id: string
   plan_id: string
+  user_id: string
   score: number
   comment: string
   created_at?: string
@@ -35,10 +36,17 @@ type PlanDesire = {
 type EventRating = {
   id: string
   plan_event_id: string
+  user_id: string
   score: number
   comment: string
   created_at?: string
   updated_at?: string
+}
+
+type RatingSummary = {
+  entity_id: string
+  average: number
+  count: number
 }
 
 type AppView = 'home' | 'ranking'
@@ -77,6 +85,8 @@ function App() {
   const [planEvents, setPlanEvents] = useState<PlanEvent[]>([])
   const [planDesires, setPlanDesires] = useState<PlanDesire[]>([])
   const [eventRatings, setEventRatings] = useState<EventRating[]>([])
+  const [planDesireSummaries, setPlanDesireSummaries] = useState<RatingSummary[]>([])
+  const [eventRatingSummaries, setEventRatingSummaries] = useState<RatingSummary[]>([])
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [deleting, setDeleting] = useState(false)
@@ -157,6 +167,8 @@ function App() {
       setPlanEvents([])
       setPlanDesires([])
       setEventRatings([])
+      setPlanDesireSummaries([])
+      setEventRatingSummaries([])
       setSelectedPlan(null)
       setEditingPlan(null)
       setSchedulingPlan(null)
@@ -532,11 +544,13 @@ function App() {
       setPlanEvents([])
       setPlanDesires([])
       setEventRatings([])
+      setPlanDesireSummaries([])
+      setEventRatingSummaries([])
       setLoading(false)
       return
     }
 
-    const [eventsResult, desiresResult] = await Promise.all([
+    const [eventsResult, desiresResult, desireSummariesResult] = await Promise.all([
       supabase
         .from('plan_events')
         .select('*')
@@ -546,6 +560,9 @@ function App() {
         .from('plan_desires')
         .select('*')
         .in('plan_id', planIds),
+      supabase.rpc('get_group_plan_desire_summaries', {
+        requested_group_id: groupId,
+      }),
     ])
 
     if (eventsResult.error) {
@@ -558,6 +575,13 @@ function App() {
     if (desiresResult.error) {
       console.error('Ошибка загрузки желаемого:', desiresResult.error)
       setErrorMessage('Не удалось загрузить оценки «Желаемое».')
+      setLoading(false)
+      return
+    }
+
+    if (desireSummariesResult.error) {
+      console.error('Ошибка загрузки среднего желаемого:', desireSummariesResult.error)
+      setErrorMessage('Не удалось загрузить средние оценки «Желаемое».')
       setLoading(false)
       return
     }
@@ -575,6 +599,7 @@ function App() {
       (desire) => ({
         id: String(desire.id),
         plan_id: String(desire.plan_id),
+        user_id: String(desire.user_id),
         score: Number(desire.score),
         comment: desire.comment ?? '',
         created_at: desire.created_at ?? undefined,
@@ -584,6 +609,18 @@ function App() {
 
     const eventIds = loadedEvents.map((event) => event.id)
     let loadedRatings: EventRating[] = []
+
+    const { data: ratingSummariesData, error: ratingSummariesError } =
+      await supabase.rpc('get_group_event_rating_summaries', {
+        requested_group_id: groupId,
+      })
+
+    if (ratingSummariesError) {
+      console.error('Ошибка загрузки средних оценок по факту:', ratingSummariesError)
+      setErrorMessage('Не удалось загрузить средние оценки по факту.')
+      setLoading(false)
+      return
+    }
 
     if (eventIds.length > 0) {
       const { data: ratingsData, error: ratingsError } = await supabase
@@ -601,6 +638,7 @@ function App() {
       loadedRatings = (ratingsData ?? []).map((rating) => ({
         id: String(rating.id),
         plan_event_id: String(rating.plan_event_id),
+        user_id: String(rating.user_id),
         score: Number(rating.score),
         comment: rating.comment ?? '',
         created_at: rating.created_at ?? undefined,
@@ -612,6 +650,28 @@ function App() {
     setPlanEvents(loadedEvents)
     setPlanDesires(loadedDesires)
     setEventRatings(loadedRatings)
+    setPlanDesireSummaries(
+      (desireSummariesResult.data ?? []).map((summary: {
+        plan_id: unknown
+        average_score: unknown
+        rating_count: unknown
+      }) => ({
+        entity_id: String(summary.plan_id),
+        average: Number(summary.average_score),
+        count: Number(summary.rating_count),
+      }))
+    )
+    setEventRatingSummaries(
+      (ratingSummariesData ?? []).map((summary: {
+        plan_event_id: unknown
+        average_score: unknown
+        rating_count: unknown
+      }) => ({
+        entity_id: String(summary.plan_event_id),
+        average: Number(summary.average_score),
+        count: Number(summary.rating_count),
+      }))
+    )
     setLoading(false)
   }
 
@@ -862,12 +922,30 @@ function App() {
   }
 
 
-  function getPlanDesire(planId: string) {
-    return planDesires.find((desire) => desire.plan_id === planId)
+  function getMyPlanDesire(planId: string) {
+    return planDesires.find(
+      (desire) =>
+        desire.plan_id === planId && desire.user_id === session?.user.id
+    )
+  }
+
+  function getPlanDesireSummary(planId: string) {
+    return (
+      planDesireSummaries.find((summary) => summary.entity_id === planId) ?? {
+        entity_id: planId,
+        average: 0,
+        count: 0,
+      }
+    )
+  }
+
+  function hasOtherPlanDesires(planId: string) {
+    const myRatingCount = getMyPlanDesire(planId) ? 1 : 0
+    return getPlanDesireSummary(planId).count > myRatingCount
   }
 
   function openDesireForm(plan: Plan) {
-    const currentDesire = getPlanDesire(plan.id)
+    const currentDesire = getMyPlanDesire(plan.id)
 
     setDesirePlan(plan)
     setSelectedPlan(null)
@@ -886,7 +964,7 @@ function App() {
   }
 
   async function saveDesire() {
-    if (!desirePlan) {
+    if (!desirePlan || !session || !activeGroup) {
       return
     }
 
@@ -905,12 +983,13 @@ function App() {
       .upsert(
         {
           plan_id: desirePlan.id,
+          user_id: session.user.id,
           score,
           comment: desireComment.trim(),
           updated_at: new Date().toISOString(),
         },
         {
-          onConflict: 'plan_id',
+          onConflict: 'plan_id,user_id',
         }
       )
       .select()
@@ -926,6 +1005,7 @@ function App() {
     const savedDesire: PlanDesire = {
       id: String(data.id),
       plan_id: String(data.plan_id),
+      user_id: String(data.user_id),
       score: Number(data.score),
       comment: data.comment ?? '',
       created_at: data.created_at ?? undefined,
@@ -934,12 +1014,17 @@ function App() {
 
     setPlanDesires((currentDesires) => {
       const alreadyExists = currentDesires.some(
-        (desire) => desire.plan_id === savedDesire.plan_id
+        (desire) =>
+          desire.plan_id === savedDesire.plan_id &&
+          desire.user_id === savedDesire.user_id
       )
 
       if (alreadyExists) {
         return currentDesires.map((desire) =>
-          desire.plan_id === savedDesire.plan_id ? savedDesire : desire
+          desire.plan_id === savedDesire.plan_id &&
+          desire.user_id === savedDesire.user_id
+            ? savedDesire
+            : desire
         )
       }
 
@@ -949,15 +1034,29 @@ function App() {
     setDesirePlan(null)
     setDesireScore('')
     setDesireComment('')
+    await loadAppData(activeGroup.id)
     setSaving(false)
   }
 
-  function getEventRating(eventId: string) {
-    return eventRatings.find((rating) => rating.plan_event_id === eventId)
+  function getMyEventRating(eventId: string) {
+    return eventRatings.find(
+      (rating) =>
+        rating.plan_event_id === eventId && rating.user_id === session?.user.id
+    )
+  }
+
+  function getEventRatingSummary(eventId: string) {
+    return (
+      eventRatingSummaries.find((summary) => summary.entity_id === eventId) ?? {
+        entity_id: eventId,
+        average: 0,
+        count: 0,
+      }
+    )
   }
 
   function openFactRatingForm(event: PlanEvent) {
-    const currentRating = getEventRating(event.id)
+    const currentRating = getMyEventRating(event.id)
 
     setRatingEvent(event)
     setFactScore(currentRating ? String(currentRating.score) : '')
@@ -975,7 +1074,7 @@ function App() {
   }
 
   async function saveFactRating() {
-    if (!ratingEvent) {
+    if (!ratingEvent || !session || !activeGroup) {
       return
     }
 
@@ -999,12 +1098,13 @@ function App() {
       .upsert(
         {
           plan_event_id: ratingEvent.id,
+          user_id: session.user.id,
           score,
           comment: factComment.trim(),
           updated_at: new Date().toISOString(),
         },
         {
-          onConflict: 'plan_event_id',
+          onConflict: 'plan_event_id,user_id',
         }
       )
       .select()
@@ -1020,6 +1120,7 @@ function App() {
     const savedRating: EventRating = {
       id: String(data.id),
       plan_event_id: String(data.plan_event_id),
+      user_id: String(data.user_id),
       score: Number(data.score),
       comment: data.comment ?? '',
       created_at: data.created_at ?? undefined,
@@ -1028,12 +1129,15 @@ function App() {
 
     setEventRatings((currentRatings) => {
       const alreadyExists = currentRatings.some(
-        (rating) => rating.plan_event_id === savedRating.plan_event_id
+        (rating) =>
+          rating.plan_event_id === savedRating.plan_event_id &&
+          rating.user_id === savedRating.user_id
       )
 
       if (alreadyExists) {
         return currentRatings.map((rating) =>
-          rating.plan_event_id === savedRating.plan_event_id
+          rating.plan_event_id === savedRating.plan_event_id &&
+          rating.user_id === savedRating.user_id
             ? savedRating
             : rating
         )
@@ -1045,6 +1149,7 @@ function App() {
     setRatingEvent(null)
     setFactScore('')
     setFactComment('')
+    await loadAppData(activeGroup.id)
     setSaving(false)
   }
 
@@ -1114,24 +1219,19 @@ function App() {
         new Date(b.planned_at).getTime() - new Date(a.planned_at).getTime()
     )
 
-  const desiredRanking = planDesires
-    .map((desire) => {
-      const plan = plans.find((item) => item.id === desire.plan_id)
-
-      return {
-        plan,
-        desire,
+  const desiredRanking = plans
+    .map((plan) => ({
+      plan,
+      ...getPlanDesireSummary(plan.id),
+    }))
+    .filter((item) => item.count > 0)
+    .sort((a, b) => {
+      if (b.average !== a.average) {
+        return b.average - a.average
       }
+
+      return b.count - a.count
     })
-    .filter(
-      (
-        item
-      ): item is {
-        plan: Plan
-        desire: PlanDesire
-      } => Boolean(item.plan)
-    )
-    .sort((a, b) => b.desire.score - a.desire.score)
 
   const factRanking = plans
     .map((plan) => {
@@ -1141,20 +1241,24 @@ function App() {
           .map((event) => event.id)
       )
 
-      const ratings = eventRatings.filter((rating) =>
-        completedPlanEventIds.has(rating.plan_event_id)
+      const summaries = eventRatingSummaries.filter((summary) =>
+        completedPlanEventIds.has(summary.entity_id)
       )
 
+      const count = summaries.reduce((sum, summary) => sum + summary.count, 0)
+
       const average =
-        ratings.length > 0
-          ? ratings.reduce((sum, rating) => sum + rating.score, 0) /
-            ratings.length
+        count > 0
+          ? summaries.reduce(
+              (sum, summary) => sum + summary.average * summary.count,
+              0
+            ) / count
           : 0
 
       return {
         plan,
         average,
-        count: ratings.length,
+        count,
       }
     })
     .filter((item) => item.count > 0)
@@ -1557,9 +1661,9 @@ function App() {
                   gap: 10,
                 }}
               >
-                {desiredRanking.map(({ plan, desire }, index) => (
+                {desiredRanking.map(({ plan, average, count }, index) => (
                   <button
-                    key={desire.id}
+                    key={plan.id}
                     onClick={() => openPlanFromRanking(plan)}
                     style={rankingCardStyle}
                   >
@@ -1592,17 +1696,20 @@ function App() {
                         {plan.type}
                       </div>
 
-                      {desire.comment && (
-                        <div
-                          style={{
-                            marginTop: 6,
-                            color: '#555',
-                            fontSize: 13,
-                          }}
-                        >
-                          {desire.comment}
-                        </div>
-                      )}
+                      <div
+                        style={{
+                          marginTop: 6,
+                          color: '#777',
+                          fontSize: 13,
+                        }}
+                      >
+                        {count}{' '}
+                        {count === 1
+                          ? 'оценка'
+                          : count >= 2 && count <= 4
+                            ? 'оценки'
+                            : 'оценок'}
+                      </div>
                     </div>
 
                     <div
@@ -1612,7 +1719,7 @@ function App() {
                         whiteSpace: 'nowrap',
                       }}
                     >
-                      {desire.score}/10
+                      {average.toFixed(1)}/10
                     </div>
                   </button>
                 ))}
@@ -1907,7 +2014,8 @@ function App() {
         >
           {completedEvents.map((event) => {
             const plan = plans.find((item) => item.id === event.plan_id)
-            const rating = getEventRating(event.id)
+            const myRating = getMyEventRating(event.id)
+            const ratingSummary = getEventRatingSummary(event.id)
 
             if (!plan) {
               return null
@@ -1970,7 +2078,7 @@ function App() {
                     </div>
                   )}
 
-                  {rating && (
+                  {(myRating || ratingSummary.count > 0) && (
                     <div
                       style={{
                         marginTop: 10,
@@ -1985,10 +2093,11 @@ function App() {
                           fontSize: 14,
                         }}
                       >
-                        ⭐ Оценка по факту: {rating.score}/10
+                        ⭐ Моя оценка по факту:{' '}
+                        {myRating ? `${myRating.score}/10` : 'нет'}
                       </div>
 
-                      {rating.comment && (
+                      {ratingSummary.count > 0 && (
                         <div
                           style={{
                             marginTop: 5,
@@ -1996,7 +2105,25 @@ function App() {
                             fontSize: 14,
                           }}
                         >
-                          {rating.comment}
+                          Средняя по группе: {ratingSummary.average.toFixed(1)}/10
+                          {' · '}{ratingSummary.count}{' '}
+                          {ratingSummary.count === 1
+                            ? 'оценка'
+                            : ratingSummary.count >= 2 && ratingSummary.count <= 4
+                              ? 'оценки'
+                              : 'оценок'}
+                        </div>
+                      )}
+
+                      {myRating?.comment && (
+                        <div
+                          style={{
+                            marginTop: 5,
+                            color: '#555',
+                            fontSize: 14,
+                          }}
+                        >
+                          {myRating.comment}
                         </div>
                       )}
                     </div>
@@ -2010,7 +2137,7 @@ function App() {
                     marginTop: 12,
                   }}
                 >
-                  ⭐ {rating ? 'Изменить оценку по факту' : 'Оценить по факту'}
+                  ⭐ {myRating ? 'Изменить оценку по факту' : 'Оценить по факту'}
                 </button>
               </div>
             )
@@ -2089,7 +2216,8 @@ function App() {
 
               <div>{plan.price}</div>
 
-              {getPlanDesire(plan.id) && (
+              {(getMyPlanDesire(plan.id) ||
+                getPlanDesireSummary(plan.id).count > 0) && (
                 <div
                   style={{
                     marginTop: 8,
@@ -2097,7 +2225,11 @@ function App() {
                     fontWeight: 600,
                   }}
                 >
-                  💛 Желаемое: {getPlanDesire(plan.id)?.score}/10
+                  💛 Моё: {getMyPlanDesire(plan.id)?.score ?? 'нет'}
+                  {getMyPlanDesire(plan.id) ? '/10' : ''}
+                  {hasOtherPlanDesires(plan.id) && (
+                    <> · Среднее: {getPlanDesireSummary(plan.id).average.toFixed(1)}/10</>
+                  )}
                 </div>
               )}
 
@@ -2230,7 +2362,8 @@ function App() {
               </a>
             )}
 
-            {getPlanDesire(selectedPlan.id) && (
+            {(getMyPlanDesire(selectedPlan.id) ||
+              getPlanDesireSummary(selectedPlan.id).count > 0) && (
               <div
                 style={{
                   marginTop: 14,
@@ -2244,10 +2377,13 @@ function App() {
                     fontWeight: 700,
                   }}
                 >
-                  💛 Желаемое: {getPlanDesire(selectedPlan.id)?.score}/10
+                  💛 Моё «Желаемое»:{' '}
+                  {getMyPlanDesire(selectedPlan.id)
+                    ? `${getMyPlanDesire(selectedPlan.id)?.score}/10`
+                    : 'нет'}
                 </div>
 
-                {getPlanDesire(selectedPlan.id)?.comment && (
+                {hasOtherPlanDesires(selectedPlan.id) && (
                   <div
                     style={{
                       marginTop: 6,
@@ -2255,7 +2391,27 @@ function App() {
                       fontSize: 14,
                     }}
                   >
-                    {getPlanDesire(selectedPlan.id)?.comment}
+                    Среднее по группе:{' '}
+                    {getPlanDesireSummary(selectedPlan.id).average.toFixed(1)}/10
+                    {' · '}{getPlanDesireSummary(selectedPlan.id).count}{' '}
+                    {getPlanDesireSummary(selectedPlan.id).count === 1
+                      ? 'оценка'
+                      : getPlanDesireSummary(selectedPlan.id).count >= 2 &&
+                          getPlanDesireSummary(selectedPlan.id).count <= 4
+                        ? 'оценки'
+                        : 'оценок'}
+                  </div>
+                )}
+
+                {getMyPlanDesire(selectedPlan.id)?.comment && (
+                  <div
+                    style={{
+                      marginTop: 6,
+                      color: '#555',
+                      fontSize: 14,
+                    }}
+                  >
+                    {getMyPlanDesire(selectedPlan.id)?.comment}
                   </div>
                 )}
               </div>
@@ -2268,7 +2424,7 @@ function App() {
                 marginTop: 14,
               }}
             >
-              💛 {getPlanDesire(selectedPlan.id) ? 'Изменить желаемое' : 'Оценить желаемое'}
+              💛 {getMyPlanDesire(selectedPlan.id) ? 'Изменить желаемое' : 'Оценить желаемое'}
             </button>
 
             <button
