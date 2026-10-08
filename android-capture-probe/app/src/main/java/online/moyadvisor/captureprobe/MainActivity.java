@@ -495,7 +495,7 @@ public class MainActivity extends Activity {
             return;
         }
         Uri uri = data.getData();
-        byte[] content = batch().toString(2).getBytes(StandardCharsets.UTF_8);
+        byte[] content = batch().toString().getBytes(StandardCharsets.UTF_8);
         try (OutputStream stream = getContentResolver().openOutputStream(uri, "wt")) {
             if (stream == null) throw new IllegalStateException("Нет доступа к файлу");
             stream.write(content);
