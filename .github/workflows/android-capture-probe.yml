@@ -1,0 +1,53 @@
+name: Android capture probe (isolated)
+on:
+  push:
+    branches:
+      - experiment/android-capture-probe-20261008
+    paths:
+      - 'android-capture-probe/**'
+      - '.github/workflows/android-capture-probe.yml'
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: ''
+      - name: Install Android platform
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+      - name: Validate probe JavaScript syntax
+        run: node --check android-capture-probe/app/src/main/assets/probe.js
+      - name: Run parser regression tests
+        run: node --test android-capture-probe/tests/probe.test.cjs
+      - name: Assemble debug APK
+        working-directory: android-capture-probe
+        run: gradle --no-daemon :app:assembleDebug
+      - name: Verify APK and inspect package
+        working-directory: android-capture-probe
+        run: |
+          set -euo pipefail
+          APK=app/build/outputs/apk/debug/app-debug.apk
+          test -s "$APK"
+          unzip -t "$APK" | tail -1
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$APK" | head -4
+          sha256sum "$APK"
+          cp "$APK" ../advisor-android-capture-test.apk
+      - name: Upload single installable APK
+        uses: actions/upload-artifact@v7
+        with:
+          path: advisor-android-capture-test.apk
+          archive: false
+          retention-days: 14
