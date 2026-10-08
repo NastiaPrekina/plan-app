@@ -10,7 +10,7 @@
       return url.protocol === "https:" ? url.href : "";
     } catch (_) { return ""; }
   };
-  const isGenericImage = (value) => /(?:wb-og|\/site\/i\/|logo|sprite|placeholder|favicon|icon|(?:\\/|^)avatar(?:\\/|\\.)|badge|1x1|pixel|\/ads?\/|yastatic-net\.ru\/s3\/afisha-frontend\/static)/i.test(value || "");
+  const isGenericImage = (value) => /(?:wb-og|\/site\/i\/|logo|sprite|placeholder|favicon|icon|\bavatar\b|badge|1x1|pixel|\/ads?\/|yastatic-net\.ru\/s3\/afisha-frontend\/static)/i.test(value || "");
   const isGenericTitle = (value) => /(?:интернет.?магазин\s+wildberries|широкий ассортимент товаров)/i.test(value || "");
   const isPriceText = (value) => /^\d[\d\s.,]*(?:₽|руб\.?|₸|\$|€)?$/i.test(value || "");
   const isPromotionalTitle = (value) => /^(?:распродажа|скидки?|акция|хит|хит продаж|новинка|бестселлер|реклама|спецпредложение|распродажа товаров)$/i.test(clean(value));
