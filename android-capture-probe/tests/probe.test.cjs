@@ -128,7 +128,8 @@ test('afisha event with schema.org date and venue',()=>{
   });
   assert.equal(o.detectedCategory,'event');
   assert.equal(o.capture.kind,'event');
-  assert.equal(o.capture.startDate,'2027-04-07T20:00');
+  assert.equal(o.capture.startDate,'2027-04-07');
+  assert.equal(o.capture.startTime,'20:00');
   assert.equal(o.capture.venue,'Клуб');
   assert.equal(o.captureReady,true);
 });

@@ -194,7 +194,7 @@
     "moscow": "Москва", "msk": "Москва", "kazan": "Казань",
     "ekaterinburg": "Екатеринбург", "novosibirsk": "Новосибирск"
   })[value] || "";
-  const isoDay = (raw) => clean(raw || "", 75).match(/\b20\d{2}-\d{2}-\d{2}\b/)?.[0] || "";
+  const isoDay = (raw) => clean(raw || "", 75).match(/(?:^|[^\d])(20\d{2}-\d{2}-\d{2})(?!\d)/)?.[1] || "";
   const isoTime = (raw) => clean(raw || "", 75).match(/[T ](\d{2}:\d{2})/)?.[1] || "";
   const nowIso = new Date().toISOString().slice(0,10);
   const fixedUrl = (url) => url.split("?")[0].split("#")[0];
@@ -435,7 +435,7 @@
     structuredPrice: category === "product" ? structuredPrice : "",
     imageOptions,
     structuredImage,
-    yearCandidate: category==="movie"||category==="series"?extra.year||"": "",
+    yearCandidate: category==="movie"||category==="series"?String(extra.year||""): "",
     genres: extra.genres || [],
     originalTitle: extra.originalTitle || "",
     jsonLdTypes: ldNodes.map((node) => typesOf(node).join(",")).filter(Boolean).slice(0, 8),
