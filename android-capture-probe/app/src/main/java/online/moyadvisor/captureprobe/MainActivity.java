@@ -91,7 +91,7 @@ public class MainActivity extends Activity {
         root.setBackgroundColor(Color.WHITE);
         setContentView(root);
 
-        root.addView(label("Advisor · Android захват v0.4", 19));
+        root.addView(label("Advisor · Android захват v0.5", 19));
         TextView subtitle = label("Черновики сохраняются только на этом телефоне, не в Буфере Advisor.", 11);
         subtitle.setPadding(0, dp(3), 0, dp(5));
         root.addView(subtitle);
@@ -120,8 +120,8 @@ public class MainActivity extends Activity {
             showingHistory = !showingHistory;
             renderLowerContent();
         });
-        addButton(row2, "Отправить всё", v -> shareReportFile());
-        addButton(row2, "JSON-файл", v -> saveReportFile());
+        addButton(row2, "Отправить файл", v -> shareReportFile());
+        addButton(row2, "Сохранить JSON", v -> saveReportFile());
 
         ScrollView scroll = new ScrollView(this);
         root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
@@ -168,7 +168,7 @@ public class MainActivity extends Activity {
 
         TextView title = label("На телефоне: " + records.length() + " из " + MAX_RECORDS + " последних захватов", 14);
         lowerContent.addView(title);
-        TextView note = label("Нажми запись, чтобы открыть подробности. «Отправить всё» передаёт один JSON-файл в Telegram, почту или другое приложение.", 11);
+        TextView note = label("Нажми запись, чтобы открыть подробности. «Отправить файл» передаёт вложение без текстового сообщения. «Сохранить JSON» сохраняет документ в выбранную папку.", 11);
         note.setPadding(0, dp(6), 0, dp(8));
         lowerContent.addView(note);
         if (records.length() == 0) {
@@ -193,6 +193,13 @@ public class MainActivity extends Activity {
                 lowerContent.addView(item);
             }
         }
+        Button copyAll = new Button(this);
+        copyAll.setText("Скопировать все результаты одним JSON");
+        copyAll.setTextSize(12);
+        copyAll.setAllCaps(false);
+        copyAll.setOnClickListener(v -> copyText(batch().toString(), "Скопированы все " + records.length() + " записей одним JSON."));
+        lowerContent.addView(copyAll);
+
         Button clear = new Button(this);
         clear.setText("Очистить локальную историю");
         clear.setTextSize(12);
@@ -445,16 +452,21 @@ public class MainActivity extends Activity {
         if (!writeCacheReport()) return;
         try {
             Uri uri = Uri.parse(REPORT_URI);
-            Intent intent = new Intent(Intent.ACTION_SEND);
-            intent.setType("application/json");
-            intent.putExtra(Intent.EXTRA_STREAM, uri);
-            intent.putExtra(Intent.EXTRA_SUBJECT, "Advisor: сводный Android-тест");
-            intent.putExtra(Intent.EXTRA_TEXT, "Сводный отчёт Advisor: " + records.length() + " проверок");
-            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            intent.setClipData(ClipData.newRawUri("advisor-capture-report.json", uri));
-            startActivity(Intent.createChooser(intent, "Отправить один JSON-отчёт"));
+            // Do not include EXTRA_TEXT: some share targets pick the text and
+            // silently drop EXTRA_STREAM, leaving only "Сводный отчёт ...".
+            Intent send = new Intent(Intent.ACTION_SEND);
+            send.setType("application/octet-stream");
+            send.putExtra(Intent.EXTRA_STREAM, uri);
+            send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            ClipData clip = ClipData.newRawUri("Advisor-Android-capture-report.json", uri);
+            send.setClipData(clip);
+            Intent chooser = Intent.createChooser(send, "Отправить JSON как файл");
+            chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            chooser.setClipData(clip);
+            startActivity(chooser);
+            status.setText("Выбери приложение, которое принимает файлы. Передаётся JSON-документ.");
         } catch (Exception ex) {
-            status.setText("Не удалось открыть меню «Поделиться»: " + ex.getMessage());
+            status.setText("Не удалось отправить файл: " + ex.getMessage() + ". Используй «Сохранить JSON».");
         }
     }
 
@@ -463,24 +475,52 @@ public class MainActivity extends Activity {
             status.setText("Сначала проверь хотя бы одну страницу.");
             return;
         }
-        Intent save = new Intent(Intent.ACTION_CREATE_DOCUMENT);
-        save.addCategory(Intent.CATEGORY_OPENABLE);
-        save.setType("application/json");
-        save.putExtra(Intent.EXTRA_TITLE, "Advisor-Android-capture-report.json");
-        startActivityForResult(save, EXPORT_REQUEST);
+        try {
+            Intent save = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+            save.addCategory(Intent.CATEGORY_OPENABLE);
+            save.setType("application/json");
+            save.putExtra(Intent.EXTRA_TITLE, "Advisor-Android-capture-report.json");
+            startActivityForResult(save, EXPORT_REQUEST);
+            status.setText("Выбери «Загрузки» и нажми «Сохранить». История остаётся на телефоне.");
+        } catch (Exception ex) {
+            status.setText("Не удалось открыть выбор папки: " + ex.getMessage());
+        }
     }
 
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode != EXPORT_REQUEST || resultCode != Activity.RESULT_OK || data == null) return;
+        if (requestCode != EXPORT_REQUEST) return;
+        if (resultCode != Activity.RESULT_OK || data == null || data.getData() == null) {
+            status.setText("Сохранение отменено. История по-прежнему на телефоне.");
+            return;
+        }
         Uri uri = data.getData();
-        if (uri == null) return;
-        try (OutputStream stream = getContentResolver().openOutputStream(uri)) {
-            if (stream == null) throw new IllegalStateException("Нет доступа к выбранному файлу");
-            stream.write(batch().toString(2).getBytes(StandardCharsets.UTF_8));
-            Toast.makeText(this, "JSON-отчёт сохранён", Toast.LENGTH_LONG).show();
+        byte[] content = batch().toString(2).getBytes(StandardCharsets.UTF_8);
+        try (OutputStream stream = getContentResolver().openOutputStream(uri, "wt")) {
+            if (stream == null) throw new IllegalStateException("Нет доступа к файлу");
+            stream.write(content);
+            stream.flush();
         } catch (Exception ex) {
-            status.setText("Не удалось сохранить файл: " + ex.getMessage());
+            status.setText("Не удалось записать JSON: " + ex.getMessage());
+            return;
+        }
+        try (InputStream check = getContentResolver().openInputStream(uri)) {
+            if (check == null) throw new IllegalStateException("Нет доступа к записанному файлу");
+            ByteArrayOutputStream verify = new ByteArrayOutputStream();
+            byte[] buffer = new byte[4096];
+            int length;
+            while ((length = check.read(buffer)) != -1) verify.write(buffer, 0, length);
+            byte[] persisted = verify.toByteArray();
+            if (persisted.length != content.length
+                || new JSONObject(new String(persisted, StandardCharsets.UTF_8))
+                    .getJSONArray("captures").length() != records.length()) {
+                throw new IllegalStateException("Число записей или размер файла не совпадает");
+            }
+            status.setText("JSON сохранён: " + records.length() + " проверок, " + content.length
+                + " байт. Теперь прикрепи файл в чат.");
+            Toast.makeText(this, "Файл проверен: " + records.length() + " записей", Toast.LENGTH_LONG).show();
+        } catch (Exception ex) {
+            status.setText("JSON записан, но проверить файл не удалось: " + ex.getMessage());
         }
     }
 

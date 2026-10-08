@@ -4,6 +4,25 @@ This is **not** Personal Advisor and does not connect to the production database
 This proof-of-concept tests whether an Android WebView can open pages shared
 from mobile apps and read the DOM metadata needed for existing capture parsers.
 
+## v0.5: fix batch JSON file sharing and checked file saving
+
+- Root cause of the only-text message: v0.4 included Android EXTRA_TEXT alongside
+  EXTRA_STREAM, and some share receivers posted the summary text but ignored
+  the JSON attachment.
+- "Отправить файл" now sends only a JSON document with a read-granted content
+  URI and broad binary attachment MIME; it does not send a text caption.
+- "Сохранить JSON" writes through Android's system document picker, then reads
+  the saved file to verify the byte count and number of captures before claiming
+  success. Errors are shown instead of silently claiming success.
+- History also has one-button "Скопировать все результаты одним JSON"
+  for copying a single consolidated report if file transfer is unavailable.
+- **Important: v0.4 history stays inside the installed v0.4 app.** Builds are
+  signed with runner-local test keys and may require uninstalling the old app,
+  which deletes its history. Export the nine existing v0.4 captures with its
+  existing "JSON-файл" action before uninstalling; then attach the file
+  manually to ChatGPT. New build cannot read old local app data after uninstall.
+- Production Advisor, Buffer, users and database remain untouched.
+
 ## v0.4: end-to-end local pilot (one installation, batch testing)
 
 - Shares from Android open in HTTPS-only WebView and automatically yield structured
