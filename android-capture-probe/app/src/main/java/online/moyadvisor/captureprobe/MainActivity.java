@@ -1,239 +1,98 @@
 package online.moyadvisor.captureprobe;
 
 import android.app.Activity;
-import android.app.AlertDialog;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.content.ClipData;
-import android.content.ClipboardManager;
-import android.content.Context;
 import android.content.Intent;
-import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.net.Uri;
-import android.view.View;
+import android.webkit.CookieManager;
 import android.webkit.WebChromeClient;
-import android.webkit.WebResourceError;
-import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceError;
+import android.view.View;
 import android.widget.Button;
-import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
-import org.json.JSONArray;
 import org.json.JSONObject;
 import org.json.JSONTokener;
 import java.io.ByteArrayOutputStream;
-import java.io.File;
-import java.io.FileOutputStream;
 import java.io.InputStream;
-import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+/**
+ * The actual Advisor website is the user interface and the source of auth.
+ * An isolated WebView reads shared public pages with the shared server parser.
+ * It never receives a native JavaScript bridge, token, or Advisor cookies.
+ * User-approved saves are sent from the authenticated Advisor WebView to the
+ * EXISTING per-category server endpoints, bound to that session's userId.
+ */
 public class MainActivity extends Activity {
-    private static final Pattern LINK = Pattern.compile("https?://[^\\s<>\"']+", Pattern.CASE_INSENSITIVE);
-    private static final int MAX_RECORDS = 25;
-    private static final int EXPORT_REQUEST = 501;
-    private static final String PREFS = "advisor_capture_test_local_v4";
-    private static final String HISTORY = "capture_history";
-    private static final String REPORT_URI = "content://online.moyadvisor.captureprobe.reports/report.json";
-
-    private WebView browser;
-    private EditText urlInput;
-    private TextView status;
-    private Button historyButton;
-    private LinearLayout lowerContent;
+    private static final String APP_ORIGIN = "https://app.moyadvisor.online";
+    private static final String APP_HOST = "app.moyadvisor.online";
+    private static final String PARSER_URL = APP_ORIGIN + "/api/android-capture/script";
+    private static final Pattern HTTPS_LINK = Pattern.compile("https://[^\\s<>\"']+", Pattern.CASE_INSENSITIVE);
     private final Handler handler = new Handler(Looper.getMainLooper());
-    private String probeScript;
-    private String latestReport = "Отчёт пока не готов.";
-    private int navigationCounter = 0;
-    private int autoRetryNavigation = -1;
-    private boolean showingHistory = false;
-    private JSONArray records = new JSONArray();
+    private WebView appView, sourceView;
+    private LinearLayout captureScreen;
+    private TextView message, preview;
+    private Button saveButton;
+    private boolean showingCapture = false;
+    private boolean saveBusy = false;
+    private int captureSequence = 0;
+    private int saveSequence = 0;
+    private JSONObject currentCapture;
+    private String parserScript;
+    private String sharedUrl;
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
-        probeScript = loadAsset("probe.js");
-        records = loadHistory();
         buildUi();
-        configureWebView();
-        handleIntent(getIntent());
+        appView.loadUrl(APP_ORIGIN + "/capture");
+        handleShare(getIntent());
     }
 
     @Override protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
-        handleIntent(intent);
+        handleShare(intent);
     }
 
-    private int dp(int px) {
-        return Math.round(px * getResources().getDisplayMetrics().density);
+    private int dp(int value) {
+        return Math.round(value * getResources().getDisplayMetrics().density);
     }
 
-    private TextView label(String text, int size) {
+    private TextView makeText(String value, int size) {
         TextView view = new TextView(this);
-        view.setText(text);
+        view.setText(value);
         view.setTextSize(size);
-        view.setTextColor(Color.rgb(39, 48, 50));
+        view.setTextColor(Color.rgb(45, 53, 55));
         return view;
     }
 
-    private void buildUi() {
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(10), dp(9), dp(10), dp(9));
-        root.setBackgroundColor(Color.WHITE);
-        setContentView(root);
-
-        root.addView(label("Advisor · Android захват v0.6", 19));
-        TextView subtitle = label("Черновики сохраняются только на этом телефоне, не в Буфере Advisor.", 11);
-        subtitle.setPadding(0, dp(3), 0, dp(5));
-        root.addView(subtitle);
-
-        urlInput = new EditText(this);
-        urlInput.setSingleLine(true);
-        urlInput.setTextSize(13);
-        urlInput.setHint("https://... или Поделиться → Advisor");
-        urlInput.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_URI);
-        root.addView(urlInput, new LinearLayout.LayoutParams(-1, dp(43)));
-
-        LinearLayout row1 = buttonRow(root);
-        addButton(row1, "Открыть", v -> openUrl(urlInput.getText().toString()));
-        addButton(row1, "Проверить", v -> probe(navigationCounter));
-        addButton(row1, "Копировать", v -> copyText(latestReport, "Текущий отчёт скопирован"));
-
-        status = label("Отправь ссылку из приложения через «Поделиться».", 12);
-        status.setPadding(0, dp(6), 0, dp(5));
-        root.addView(status);
-
-        browser = new WebView(this);
-        root.addView(browser, new LinearLayout.LayoutParams(-1, dp(230)));
-
-        LinearLayout row2 = buttonRow(root);
-        historyButton = addButton(row2, "История", v -> {
-            showingHistory = !showingHistory;
-            renderLowerContent();
-        });
-        addButton(row2, "Отправить файл", v -> shareReportFile());
-        addButton(row2, "Сохранить JSON", v -> saveReportFile());
-
-        ScrollView scroll = new ScrollView(this);
-        root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
-        lowerContent = new LinearLayout(this);
-        lowerContent.setOrientation(LinearLayout.VERTICAL);
-        lowerContent.setPadding(dp(4), dp(8), dp(4), dp(4));
-        scroll.addView(lowerContent);
-        renderLowerContent();
-    }
-
-    private LinearLayout buttonRow(LinearLayout parent) {
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        parent.addView(row, new LinearLayout.LayoutParams(-1, dp(45)));
-        return row;
-    }
-
-    private Button addButton(LinearLayout row, String title, View.OnClickListener callback) {
+    private Button addButton(LinearLayout row, String text, View.OnClickListener callback) {
         Button button = new Button(this);
-        button.setText(title);
+        button.setText(text);
+        button.setTextSize(12);
         button.setAllCaps(false);
-        button.setTextSize(11);
-        button.setPadding(0, 0, 0, 0);
-        row.addView(button, new LinearLayout.LayoutParams(0, dp(45), 1));
         button.setOnClickListener(callback);
+        row.addView(button, new LinearLayout.LayoutParams(0, dp(46), 1));
         return button;
     }
 
-    private void renderLowerContent() {
-        if (lowerContent == null) return;
-        lowerContent.removeAllViews();
-        if (historyButton != null) historyButton.setText(
-            showingHistory ? "Результат" : "История (" + records.length() + ")"
-        );
-        if (!showingHistory) {
-            TextView title = label("Последний захват", 15);
-            lowerContent.addView(title);
-            TextView info = label(latestReport, 11);
-            info.setTextIsSelectable(true);
-            info.setPadding(0, dp(8), 0, dp(8));
-            lowerContent.addView(info);
-            return;
-        }
-
-        TextView title = label("На телефоне: " + records.length() + " из " + MAX_RECORDS + " последних захватов", 14);
-        lowerContent.addView(title);
-        TextView note = label("Нажми запись, чтобы открыть подробности. «Отправить файл» передаёт вложение без текстового сообщения. «Сохранить JSON» сохраняет документ в выбранную папку.", 11);
-        note.setPadding(0, dp(6), 0, dp(8));
-        lowerContent.addView(note);
-        if (records.length() == 0) {
-            lowerContent.addView(label("Пока нет сохранённых проверок.", 13));
-        } else {
-            for (int i = 0; i < records.length(); i++) {
-                final JSONObject entry = records.optJSONObject(i);
-                if (entry == null) continue;
-                String category = categoryName(entry.optString("detectedCategory"));
-                String titleText = entry.optString("captureTitle", "Без названия");
-                String readiness = entry.optBoolean("captureReady", false) ? "✓" : "⚠";
-                TextView item = label(readiness + " " + category + " · " + titleText + "\n"
-                    + entry.optString("sourceProvider", "") + " · " + entry.optString("capturePriceCandidate", ""), 13);
-                item.setPadding(dp(6), dp(7), dp(6), dp(9));
-                item.setBackgroundColor(i % 2 == 0 ? Color.rgb(245, 248, 247) : Color.WHITE);
-                item.setOnClickListener(v -> {
-                    latestReport = entry.toString();
-                    showingHistory = false;
-                    renderLowerContent();
-                    status.setText("Открыт сохранённый черновик. Это не запись в Буфер.");
-                });
-                lowerContent.addView(item);
-            }
-        }
-        Button copyAll = new Button(this);
-        copyAll.setText("Скопировать все результаты одним JSON");
-        copyAll.setTextSize(12);
-        copyAll.setAllCaps(false);
-        copyAll.setOnClickListener(v -> copyText(batch().toString(), "Скопированы все " + records.length() + " записей одним JSON."));
-        lowerContent.addView(copyAll);
-
-        Button clear = new Button(this);
-        clear.setText("Очистить локальную историю");
-        clear.setTextSize(12);
-        clear.setAllCaps(false);
-        clear.setOnClickListener(v -> new AlertDialog.Builder(this)
-            .setTitle("Очистить результаты?")
-            .setMessage("Удалятся только локальные тестовые захваты на этом телефоне.")
-            .setNegativeButton("Отмена", null)
-            .setPositiveButton("Очистить", (dialog, which) -> {
-                records = new JSONArray();
-                saveHistory();
-                renderLowerContent();
-                status.setText("Локальная история очищена.");
-            }).show());
-        lowerContent.addView(clear);
-    }
-
-    private static String categoryName(String category) {
-        switch (category) {
-            case "product": return "Товар";
-            case "movie": return "Фильм";
-            case "series": return "Сериал";
-            case "game": return "Игра";
-            case "book": return "Книга";
-            case "audiobook": return "Аудиокнига";
-            case "place": return "Заведение";
-            case "event": return "Событие";
-            default: return "Не распознано";
-        }
-    }
-
-    private void configureWebView() {
-        WebSettings settings = browser.getSettings();
+    private void configureWebView(WebView view) {
+        WebSettings settings = view.getSettings();
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
         settings.setAllowFileAccess(false);
@@ -243,336 +102,421 @@ public class MainActivity extends Activity {
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
         settings.setSupportMultipleWindows(false);
         settings.setSafeBrowsingEnabled(true);
-        browser.setWebChromeClient(new WebChromeClient() {
-            @Override public void onProgressChanged(WebView view, int progress) {
-                if (progress < 100) status.setText("Загрузка: " + progress + "%");
+        CookieManager.getInstance().setAcceptCookie(true);
+        CookieManager.getInstance().setAcceptThirdPartyCookies(view, false);
+        view.setWebChromeClient(new WebChromeClient());
+    }
+
+    private void buildUi() {
+        LinearLayout root = new LinearLayout(this);
+        root.setBackgroundColor(Color.WHITE);
+        root.setOrientation(LinearLayout.VERTICAL);
+        setContentView(root);
+        LinearLayout toolbar = new LinearLayout(this);
+        toolbar.setOrientation(LinearLayout.HORIZONTAL);
+        root.addView(toolbar, new LinearLayout.LayoutParams(-1, dp(50)));
+        addButton(toolbar, "Advisor", v -> openAdvisor(APP_ORIGIN + "/"));
+        addButton(toolbar, "Буфер", v -> openAdvisor(APP_ORIGIN + "/capture"));
+        addButton(toolbar, "Захват", v -> {
+            if (sharedUrl == null) {
+                Toast.makeText(this, "Откройте карточку в другом приложении → Поделиться → Advisor", Toast.LENGTH_LONG).show();
+                return;
             }
+            showCapture(true);
         });
-        browser.setWebViewClient(new WebViewClient() {
+
+        FrameLayout frame = new FrameLayout(this);
+        root.addView(frame, new LinearLayout.LayoutParams(-1, 0, 1));
+        appView = new WebView(this);
+        configureWebView(appView);
+        appView.setWebViewClient(new WebViewClient() {
             @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-                Uri target = request.getUrl();
-                if (!"https".equalsIgnoreCase(target.getScheme())) {
-                    status.setText("Небезопасный переход заблокирован: " + target.getScheme());
-                    return true;
-                }
-                return false;
-            }
-            @Override public void onPageStarted(WebView view, String url, android.graphics.Bitmap icon) {
-                navigationCounter++;
-                autoRetryNavigation = -1;
-                status.setText("Открываю: " + url);
+                return !"https".equalsIgnoreCase(request.getUrl().getScheme());
             }
             @Override public void onPageFinished(WebView view, String url) {
-                final int count = navigationCounter;
-                status.setText("Страница открылась. Проверяю через 2 и 6 секунд.");
-                handler.postDelayed(() -> { if (count == navigationCounter) probe(count); }, 2000);
-                handler.postDelayed(() -> { if (count == navigationCounter) probe(count); }, 6000);
+                CookieManager.getInstance().flush();
+            }
+        });
+        frame.addView(appView, new FrameLayout.LayoutParams(-1, -1));
+
+        captureScreen = new LinearLayout(this);
+        captureScreen.setOrientation(LinearLayout.VERTICAL);
+        captureScreen.setPadding(dp(9), dp(5), dp(9), dp(5));
+        captureScreen.setBackgroundColor(Color.WHITE);
+        frame.addView(captureScreen, new FrameLayout.LayoutParams(-1, -1));
+        captureScreen.setVisibility(View.GONE);
+
+        message = makeText("Поделитесь ссылкой на карточку.", 13);
+        message.setPadding(dp(4), dp(4), dp(4), dp(7));
+        captureScreen.addView(message);
+
+        sourceView = new WebView(this);
+        configureWebView(sourceView);
+        sourceView.setWebViewClient(new WebViewClient() {
+            @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                return !"https".equalsIgnoreCase(request.getUrl().getScheme());
+            }
+            @Override public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
+                captureSequence++;
+                currentCapture = null;
+                updatePreview(null);
+                message.setText("Загружается страница источника…");
+            }
+            @Override public void onPageFinished(WebView view, String url) {
+                int current = captureSequence;
+                handler.postDelayed(() -> loadSharedParser(current), 500);
             }
             @Override public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
                 if (request.isForMainFrame()) {
-                    status.setText("Страница не загрузилась: " + error.getDescription());
-                    storeFailure("Ошибка открытия", request.getUrl() == null ? "" : request.getUrl().toString(), error.getDescription().toString());
+                    message.setText("Не удалось открыть страницу источника: " + error.getDescription());
                 }
             }
         });
+        captureScreen.addView(sourceView, new LinearLayout.LayoutParams(-1, 0, 1));
+
+        ScrollView scroller = new ScrollView(this);
+        captureScreen.addView(scroller, new LinearLayout.LayoutParams(-1, dp(137)));
+        preview = makeText("После загрузки появится предварительная карточка.", 13);
+        preview.setTextIsSelectable(true);
+        preview.setPadding(dp(7), dp(7), dp(7), dp(7));
+        scroller.addView(preview);
+
+        LinearLayout actions = new LinearLayout(this);
+        actions.setOrientation(LinearLayout.HORIZONTAL);
+        captureScreen.addView(actions, new LinearLayout.LayoutParams(-1, dp(52)));
+        addButton(actions, "Повторить", v -> retryCapture());
+        saveButton = addButton(actions, "Добавить в Буфер", v -> saveToBuffer());
+        saveButton.setEnabled(false);
+        addButton(actions, "Войти", v -> openAdvisor(APP_ORIGIN + "/capture"));
     }
 
-    private void handleIntent(Intent intent) {
-        if (intent == null || !Intent.ACTION_SEND.equals(intent.getAction())) return;
-        String shared = intent.getStringExtra(Intent.EXTRA_TEXT);
-        if (shared == null || shared.trim().isEmpty()) shared = intent.getStringExtra(Intent.EXTRA_HTML_TEXT);
-        if (shared == null || shared.trim().isEmpty()) return;
-        String url = firstHttps(shared);
-        if (url == null) {
-            urlInput.setText(shared);
-            status.setText("Ссылка HTTPS не обнаружена.");
-            return;
-        }
-        urlInput.setText(url);
-        openUrl(url);
+    private void openAdvisor(String url) {
+        showCapture(false);
+        appView.loadUrl(url);
     }
 
-    private static String firstHttps(String text) {
-        if (text == null) return null;
-        Matcher matcher = LINK.matcher(text);
+    private void showCapture(boolean visible) {
+        showingCapture = visible;
+        captureScreen.setVisibility(visible ? View.VISIBLE : View.GONE);
+        appView.setVisibility(visible ? View.GONE : View.VISIBLE);
+    }
+
+    private static String firstHttps(String raw) {
+        if (raw == null) return null;
+        Matcher matcher = HTTPS_LINK.matcher(raw);
         if (!matcher.find()) return null;
-        String candidate = matcher.group();
-        while (candidate.endsWith(".") || candidate.endsWith(",") || candidate.endsWith(")") || candidate.endsWith("]")) {
-            candidate = candidate.substring(0, candidate.length() - 1);
+        String value = matcher.group();
+        while (value.endsWith(".") || value.endsWith(",") || value.endsWith(")") || value.endsWith("]")) {
+            value = value.substring(0, value.length() - 1);
         }
-        return candidate;
+        try {
+            Uri url = Uri.parse(value);
+            return "https".equalsIgnoreCase(url.getScheme()) && url.getHost() != null ? value : null;
+        } catch (Exception ignored) {
+            return null;
+        }
     }
 
-    private void openUrl(String text) {
-        String url = firstHttps(text);
+    private void handleShare(Intent intent) {
+        if (intent == null || !Intent.ACTION_SEND.equals(intent.getAction())) return;
+        String raw = intent.getStringExtra(Intent.EXTRA_TEXT);
+        if (raw == null || raw.isEmpty()) raw = intent.getStringExtra(Intent.EXTRA_HTML_TEXT);
+        String url = firstHttps(raw);
         if (url == null) {
-            status.setText("Нужна HTTPS-ссылка.");
+            showCapture(true);
+            message.setText("В сообщении нет HTTPS-ссылки на карточку.");
             return;
         }
-        try {
-            Uri parsed = Uri.parse(url);
-            if (!"https".equalsIgnoreCase(parsed.getScheme()) || parsed.getHost() == null) {
-                status.setText("Разрешены только HTTPS-страницы.");
-                return;
-            }
-            urlInput.setText(url);
-            showingHistory = false;
-            renderLowerContent();
-            browser.loadUrl(url);
-        } catch (Exception ex) {
-            status.setText("Некорректная ссылка.");
+        sharedUrl = url;
+        currentCapture = null;
+        saveBusy = false;
+        showCapture(true);
+        sourceView.loadUrl(url);
+    }
+
+    private void retryCapture() {
+        currentCapture = null;
+        updatePreview(null);
+        if (sourceView.getUrl() == null) {
+            if (sharedUrl != null) sourceView.loadUrl(sharedUrl);
+        } else {
+            parserScript = null;
+            loadSharedParser(captureSequence);
         }
     }
 
-    private void probe(int count) {
-        if (browser == null || browser.getUrl() == null) {
-            status.setText("Сначала открой страницу.");
+    private void loadSharedParser(int sequence) {
+        if (sequence != captureSequence) return;
+        message.setText("Получаю общий парсер Advisor…");
+        new Thread(() -> {
+            String script = parserScript;
+            String failure = null;
+            if (script == null) {
+                HttpURLConnection connection = null;
+                try {
+                    CookieManager.getInstance().flush();
+                    String cookies = CookieManager.getInstance().getCookie(APP_ORIGIN);
+                    connection = (HttpURLConnection) new URL(PARSER_URL).openConnection();
+                    connection.setInstanceFollowRedirects(false);
+                    connection.setConnectTimeout(8000);
+                    connection.setReadTimeout(12000);
+                    connection.setRequestProperty("Accept", "application/javascript");
+                    if (cookies != null && !cookies.isEmpty()) {
+                        connection.setRequestProperty("Cookie", cookies);
+                    }
+                    int code = connection.getResponseCode();
+                    if (code != 200) throw new IllegalStateException(
+                        code == 401 ? "Нужно войти в Advisor." :
+                        code == 403 ? "Для аккаунта пока закрыт доступ к Буферу." :
+                        "Сервер Advisor вернул " + code);
+                    if (!"application/javascript".equals(
+                        String.valueOf(connection.getContentType()).split(";")[0].trim())) {
+                        throw new IllegalStateException("Сервер вернул не JavaScript-парсер.");
+                    }
+                    try (InputStream input = connection.getInputStream();
+                         ByteArrayOutputStream bytes = new ByteArrayOutputStream()) {
+                        byte[] buffer = new byte[8192];
+                        int count;
+                        while ((count = input.read(buffer)) != -1) {
+                            if (bytes.size() + count > 400_000) {
+                                throw new IllegalStateException("Слишком большой ответ сервера.");
+                            }
+                            bytes.write(buffer, 0, count);
+                        }
+                        script = bytes.toString(StandardCharsets.UTF_8.name());
+                    }
+                    if (!script.contains("captureForKind") || !script.contains("__paAndroidCaptureResult")) {
+                        throw new IllegalStateException("На сервере нет актуального Android-парсера.");
+                    }
+                    parserScript = script;
+                } catch (Exception error) {
+                    failure = error.getMessage();
+                } finally {
+                    if (connection != null) connection.disconnect();
+                }
+            }
+            final String finalScript = script;
+            final String finalFailure = failure;
+            handler.post(() -> {
+                if (sequence != captureSequence) return;
+                if (finalFailure != null || finalScript == null) {
+                    message.setText("Не удалось получить парсер: " + finalFailure
+                        + " Откройте «Войти», авторизуйтесь и нажмите «Повторить».");
+                    return;
+                }
+                message.setText("Распознаю карточку общим парсером Advisor…");
+                sourceView.evaluateJavascript(finalScript, value -> {
+                    if (sequence == captureSequence) pollCapture(sequence, 0);
+                });
+            });
+        }).start();
+    }
+
+    private JSONObject jsonFromJavascript(String value) {
+        try {
+            Object decoded = new JSONTokener(value).nextValue();
+            String data = decoded instanceof String ? (String) decoded : String.valueOf(decoded);
+            return new JSONObject(data);
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private void pollCapture(int sequence, int attempt) {
+        if (sequence != captureSequence) return;
+        if (attempt > 20) {
+            message.setText("Источник отвечает слишком долго. Попробуйте ещё раз.");
             return;
         }
-        status.setText("Считываю данные открытой страницы…");
-        browser.evaluateJavascript(probeScript, value -> {
-            if (count != navigationCounter) return;
+        handler.postDelayed(() -> sourceView.evaluateJavascript(
+            "JSON.stringify(window.__paAndroidCaptureResult || null)", raw -> {
+                if (sequence != captureSequence) return;
+                JSONObject result = jsonFromJavascript(raw);
+                if (result == null || !result.optBoolean("done")) {
+                    pollCapture(sequence, attempt + 1);
+                    return;
+                }
+                JSONObject capture = result.optJSONObject("capture");
+                if (capture == null) {
+                    message.setText(result.optString("error", "Карточка не распознана. Повторите попытку."));
+                    updatePreview(null);
+                    return;
+                }
+                String original = capture.optString("sourceUrl", "");
+                String current = sourceView.getUrl();
+                if (!"https".equalsIgnoreCase(Uri.parse(original).getScheme())
+                    || current == null
+                    || !original.equals(current) && !original.equals(current.split("\\?")[0])
+                    && !(Uri.parse(current).getHost() != null
+                        && Uri.parse(current).getHost().equalsIgnoreCase(Uri.parse(original).getHost()))) {
+                    message.setText("Ссылка карточки не совпадает с открытым источником. Сохранение отменено.");
+                    updatePreview(null);
+                    return;
+                }
+                currentCapture = capture;
+                updatePreview(capture);
+                message.setText(result.optBoolean("incomplete")
+                    ? "Карточка распознана не полностью — проверьте поля перед сохранением."
+                    : "Карточка готова к проверке. Сохранение только по нажатию.");
+            }), 1000);
+    }
+
+    private String categoryName(String type) {
+        switch (type) {
+            case "product": return "Товар";
+            case "game": return "Игра";
+            case "screen": return "Фильм / сериал";
+            case "book": return "Книга / аудиокнига";
+            case "event": return "Событие";
+            case "place": return "Заведение";
+            case "hotel": return "Отель";
+            default: return "Карточка";
+        }
+    }
+
+    private void updatePreview(JSONObject capture) {
+        if (capture == null) {
+            preview.setText("Предпросмотр пока недоступен.");
+            saveButton.setEnabled(false);
+            return;
+        }
+        String type = capture.optString("kind", "");
+        String title = capture.optString("title", "");
+        StringBuilder details = new StringBuilder(categoryName(type)).append(": ").append(title);
+        if (capture.has("price") && !capture.isNull("price")) {
+            details.append("\nЦена: ").append(capture.optString("price"))
+                .append(" ").append(capture.optString("currency", ""));
+        }
+        if (capture.has("startDate") && !capture.isNull("startDate")) {
+            details.append("\nДата: ").append(capture.optString("startDate"));
+        }
+        if (capture.has("venueName") && !capture.isNull("venueName")) {
+            details.append("\nМесто: ").append(capture.optString("venueName"));
+        }
+        details.append("\nИсточник: ").append(capture.optString("sourceUrl", ""));
+        preview.setText(details.toString());
+        saveButton.setEnabled(!saveBusy && title.trim().length() > 3 && !title.trim().equals("..."));
+    }
+
+    private String endpointForKind(String kind) {
+        switch (kind) {
+            case "game": return "/api/browser-capture/steam";
+            case "screen": return "/api/browser-capture/screen";
+            case "book": return "/api/browser-capture/book";
+            case "event": return "/api/browser-capture/event";
+            case "place": return "/api/browser-capture/place";
+            case "hotel": return "/api/browser-capture/hotel";
+            case "product": return "/api/wishlist-preview/save";
+            default: return null;
+        }
+    }
+
+    private void saveToBuffer() {
+        if (currentCapture == null || saveBusy) return;
+        String endpoint = endpointForKind(currentCapture.optString("kind"));
+        if (endpoint == null) {
+            message.setText("Неподдерживаемый тип карточки. Не сохранено.");
+            return;
+        }
+        Uri appUri = Uri.parse(appView.getUrl() == null ? "" : appView.getUrl());
+        if (!"https".equalsIgnoreCase(appUri.getScheme())
+            || !APP_HOST.equalsIgnoreCase(appUri.getHost())) {
+            message.setText("Сначала откройте Advisor и войдите в свой аккаунт.");
+            return;
+        }
+        saveBusy = true;
+        saveButton.setEnabled(false);
+        message.setText("Сохраняю в Буфер вашего аккаунта…");
+        final int sequence = ++saveSequence;
+        final String body = "{\"capture\":" + currentCapture.toString() + "}";
+        new Thread(() -> {
+            HttpURLConnection connection = null;
+            boolean ok = false;
+            String error = null;
             try {
-                Object decoded = new JSONTokener(value).nextValue();
-                String objectText = decoded instanceof String ? (String) decoded : String.valueOf(decoded);
-                JSONObject result = new JSONObject(objectText);
-                latestReport = result.toString(2);
-                if (!result.has("error")) {
-                    recordCapture(result);
-                    if ("wildberries".equals(result.optString("sourceProvider"))
-                            && !result.optBoolean("captureReady", false)
-                            && autoRetryNavigation != count) {
-                        autoRetryNavigation = count;
-                        status.setText("Wildberries пока отдал неполную страницу. Перепроверю один раз позже.");
-                        handler.postDelayed(() -> { if (count == navigationCounter) probe(count); }, 12000);
+                CookieManager.getInstance().flush();
+                String cookie = CookieManager.getInstance().getCookie(APP_ORIGIN);
+                if (cookie == null || cookie.isEmpty()) {
+                    throw new IllegalStateException("Сначала войдите в Advisor.");
+                }
+                connection = (HttpURLConnection) new URL(APP_ORIGIN + endpoint).openConnection();
+                connection.setInstanceFollowRedirects(false);
+                connection.setConnectTimeout(9000);
+                connection.setReadTimeout(20000);
+                connection.setRequestMethod("POST");
+                connection.setDoOutput(true);
+                connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+                connection.setRequestProperty("Accept", "application/json");
+                connection.setRequestProperty("Cookie", cookie);
+                byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+                if (bytes.length > 100_000) throw new IllegalStateException("Слишком большая карточка.");
+                try (java.io.OutputStream out = connection.getOutputStream()) {
+                    out.write(bytes);
+                }
+                int code = connection.getResponseCode();
+                if (code >= 300 && code < 400) throw new IllegalStateException(
+                    "Сессия истекла. Войдите в Advisor и повторите.");
+                String responseText = "";
+                InputStream stream = code >= 400 ? connection.getErrorStream() : connection.getInputStream();
+                if (stream != null) {
+                    try (InputStream input = stream;
+                         ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+                        byte[] buffer = new byte[4096];
+                        int count;
+                        while ((count = input.read(buffer)) != -1) {
+                            if (output.size() + count > 100_000) throw new IllegalStateException("Слишком длинный ответ сервера.");
+                            output.write(buffer, 0, count);
+                        }
+                        responseText = output.toString(StandardCharsets.UTF_8.name());
                     }
-                    String category = categoryName(result.optString("detectedCategory"));
-                    String suffix = result.optBoolean("captureReady") ? "основные поля найдены" : "нужна проверка полей";
-                    status.setText(category + ": " + suffix + ". Сохранено локально.");
+                }
+                JSONObject response = new JSONObject(responseText);
+                JSONObject saved = response.optJSONObject("saved");
+                ok = code >= 200 && code < 300 && saved != null
+                    && saved.optString("id").length() > 0;
+                if (!ok) error = response.optString("error", code == 401
+                    ? "Сессия истекла. Войдите в Advisor." : "Сохранение не подтверждено сервером (" + code + ").");
+            } catch (Exception e) {
+                error = e.getMessage() != null ? e.getMessage() : "Сетевая ошибка.";
+            } finally {
+                if (connection != null) connection.disconnect();
+            }
+            final boolean success = ok;
+            final String failure = error;
+            handler.post(() -> {
+                if (sequence != saveSequence) return;
+                saveBusy = false;
+                if (success) {
+                    message.setText("Карточка сохранена в настоящий Буфер.");
+                    Toast.makeText(this, "Добавлено в Буфер Advisor", Toast.LENGTH_LONG).show();
+                    currentCapture = null;
+                    saveButton.setEnabled(false);
+                    openAdvisor(APP_ORIGIN + "/capture");
+                    // Navigation above fetches fresh user-scoped Buffer contents.
                 } else {
-                    status.setText("Ошибка парсера: " + result.optString("error"));
+                    message.setText("Не сохранено: " + (failure == null ? "Неизвестная ошибка." : failure)
+                        + " Для входа нажмите «Войти».");
+                    saveButton.setEnabled(true);
                 }
-                if (!showingHistory) renderLowerContent();
-                else if (historyButton != null) historyButton.setText("Результат");
-            } catch (Exception ex) {
-                latestReport = String.valueOf(value);
-                status.setText("Ошибка обработки ответа: " + ex.getMessage());
-                renderLowerContent();
-            }
-        });
+            });
+        }).start();
     }
 
-    private void storeFailure(String title, String url, String reason) {
-        try {
-            JSONObject failure = new JSONObject();
-            failure.put("version", 6);
-            failure.put("pageUrl", url);
-            failure.put("detectedCategory", "unknown");
-            failure.put("captureTitle", title);
-            failure.put("problemHint", reason);
-            failure.put("captureReady", false);
-            recordCapture(failure);
-        } catch (Exception ignored) {}
-    }
-
-    private void recordCapture(JSONObject result) {
-        try {
-            JSONObject reduced = new JSONObject();
-            String[] keys = new String[]{
-                "version", "sourceProvider", "detectedCategory", "externalId", "sourceUrl",
-                "captureReady", "missingFields", "captureTitle", "titleSource",
-                "captureImage", "capturePriceCandidate", "priceCandidates",
-                "priceObservations", "structuredPrice", "imageOptions",
-                "yearCandidate", "genres", "originalTitle", "problemHint", "capture", "jsonLdTypes",
-                "eventMatchSource", "priceWarning", "pageTitle", "readyState", "ogTitle"
-            };
-            for (String key : keys) if (result.has(key)) reduced.put(key, result.get(key));
-            reduced.put("pageUrl", withoutTracking(result.optString("pageUrl", "")));
-            reduced.put("capturedAt", System.currentTimeMillis());
-            String identity = stableKey(reduced.optString("sourceUrl", reduced.optString("pageUrl")), reduced.optString("externalId"));
-            reduced.put("_key", identity);
-
-            JSONArray next = new JSONArray();
-            next.put(reduced);
-            for (int i = 0; i < records.length() && next.length() < MAX_RECORDS; i++) {
-                JSONObject item = records.optJSONObject(i);
-                if (item == null) continue;
-                if (identity.equals(item.optString("_key"))) {
-                    // Never replace a correctly loaded card with a later skeleton/error response.
-                    if (captureQuality(item) > captureQuality(reduced)) {
-                        return;
-                    }
-                    continue;
-                }
-                next.put(item);
-            }
-            records = next;
-            saveHistory();
-            if (historyButton != null && !showingHistory) historyButton.setText("История (" + records.length() + ")");
-        } catch (Exception ex) {
-            status.setText("Не удалось сохранить локальный результат: " + ex.getMessage());
-        }
-    }
-
-    private static int captureQuality(JSONObject result) {
-        int score = result.optBoolean("captureReady", false) ? 100 : 0;
-        if (result.optString("captureTitle").length() >= 5
-                && !"...".equals(result.optString("captureTitle"))) score += 10;
-        if (!result.optString("captureImage").isEmpty()) score += 10;
-        if (!result.optString("capturePriceCandidate").isEmpty()) score += 4;
-        JSONArray missing = result.optJSONArray("missingFields");
-        if (missing != null) score -= missing.length() * 2;
-        return score;
-    }
-
-    private static String stableKey(String url, String id) {
-        Uri uri = Uri.parse(withoutTracking(url));
-        String host = uri.getHost();
-        return (host == null ? "" : host.toLowerCase()) + (uri.getPath() == null ? "" : uri.getPath()) + "|" + id;
-    }
-
-    private static String withoutTracking(String value) {
-        try {
-            Uri uri = Uri.parse(value);
-            if (!"https".equalsIgnoreCase(uri.getScheme()) || uri.getHost() == null) return "";
-            return uri.buildUpon().clearQuery().fragment(null).build().toString();
-        } catch (Exception ex) { return ""; }
-    }
-
-    private JSONArray loadHistory() {
-        String raw = getSharedPreferences(PREFS, MODE_PRIVATE).getString(HISTORY, "[]");
-        try { return new JSONArray(raw); }
-        catch (Exception ignored) { return new JSONArray(); }
-    }
-
-    private void saveHistory() {
-        SharedPreferences.Editor editor = getSharedPreferences(PREFS, MODE_PRIVATE).edit();
-        editor.putString(HISTORY, records.toString());
-        editor.apply();
-    }
-
-    private JSONObject batch() {
-        JSONObject output = new JSONObject();
-        try {
-            output.put("format", "advisor-android-probe");
-            output.put("version", 6);
-            output.put("note", "Локальные диагностические результаты. Не сохранено в Буфер.");
-            output.put("captures", records);
-        } catch (Exception ignored) {}
-        return output;
-    }
-
-    private boolean writeCacheReport() {
-        try (FileOutputStream output = new FileOutputStream(new File(getCacheDir(), "capture-report.json"))) {
-            output.write(batch().toString(2).getBytes(StandardCharsets.UTF_8));
-            return true;
-        } catch (Exception ex) {
-            status.setText("Не удалось подготовить JSON: " + ex.getMessage());
-            return false;
-        }
-    }
-
-    private void shareReportFile() {
-        if (records.length() == 0) {
-            status.setText("Сначала проверь хотя бы одну страницу.");
-            return;
-        }
-        if (!writeCacheReport()) return;
-        try {
-            Uri uri = Uri.parse(REPORT_URI);
-            // Do not include EXTRA_TEXT: some share targets pick the text and
-            // silently drop EXTRA_STREAM, leaving only "Сводный отчёт ...".
-            Intent send = new Intent(Intent.ACTION_SEND);
-            send.setType("application/octet-stream");
-            send.putExtra(Intent.EXTRA_STREAM, uri);
-            send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            ClipData clip = ClipData.newRawUri("Advisor-Android-capture-report.json", uri);
-            send.setClipData(clip);
-            Intent chooser = Intent.createChooser(send, "Отправить JSON как файл");
-            chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            chooser.setClipData(clip);
-            startActivity(chooser);
-            status.setText("Выбери приложение, которое принимает файлы. Передаётся JSON-документ.");
-        } catch (Exception ex) {
-            status.setText("Не удалось отправить файл: " + ex.getMessage() + ". Используй «Сохранить JSON».");
-        }
-    }
-
-    private void saveReportFile() {
-        if (records.length() == 0) {
-            status.setText("Сначала проверь хотя бы одну страницу.");
-            return;
-        }
-        try {
-            Intent save = new Intent(Intent.ACTION_CREATE_DOCUMENT);
-            save.addCategory(Intent.CATEGORY_OPENABLE);
-            save.setType("application/json");
-            save.putExtra(Intent.EXTRA_TITLE, "Advisor-Android-capture-report.json");
-            startActivityForResult(save, EXPORT_REQUEST);
-            status.setText("Выбери «Загрузки» и нажми «Сохранить». История остаётся на телефоне.");
-        } catch (Exception ex) {
-            status.setText("Не удалось открыть выбор папки: " + ex.getMessage());
-        }
-    }
-
-    @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
-        super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode != EXPORT_REQUEST) return;
-        if (resultCode != Activity.RESULT_OK || data == null || data.getData() == null) {
-            status.setText("Сохранение отменено. История по-прежнему на телефоне.");
-            return;
-        }
-        Uri uri = data.getData();
-        byte[] content = batch().toString().getBytes(StandardCharsets.UTF_8);
-        try (OutputStream stream = getContentResolver().openOutputStream(uri, "wt")) {
-            if (stream == null) throw new IllegalStateException("Нет доступа к файлу");
-            stream.write(content);
-            stream.flush();
-        } catch (Exception ex) {
-            status.setText("Не удалось записать JSON: " + ex.getMessage());
-            return;
-        }
-        try (InputStream check = getContentResolver().openInputStream(uri)) {
-            if (check == null) throw new IllegalStateException("Нет доступа к записанному файлу");
-            ByteArrayOutputStream verify = new ByteArrayOutputStream();
-            byte[] buffer = new byte[4096];
-            int length;
-            while ((length = check.read(buffer)) != -1) verify.write(buffer, 0, length);
-            byte[] persisted = verify.toByteArray();
-            if (persisted.length != content.length
-                || new JSONObject(new String(persisted, StandardCharsets.UTF_8))
-                    .getJSONArray("captures").length() != records.length()) {
-                throw new IllegalStateException("Число записей или размер файла не совпадает");
-            }
-            status.setText("JSON сохранён: " + records.length() + " проверок, " + content.length
-                + " байт. Теперь прикрепи файл в чат.");
-            Toast.makeText(this, "Файл проверен: " + records.length() + " записей", Toast.LENGTH_LONG).show();
-        } catch (Exception ex) {
-            status.setText("JSON записан, но проверить файл не удалось: " + ex.getMessage());
-        }
-    }
-
-    private void copyText(String content, String message) {
-        ClipboardManager manager = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-        manager.setPrimaryClip(ClipData.newPlainText("Advisor Capture Test", content));
-        status.setText(message);
-    }
-
-    private String loadAsset(String file) {
-        try (InputStream input = getAssets().open(file);
-             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
-            byte[] buffer = new byte[4096];
-            int count;
-            while ((count = input.read(buffer)) != -1) output.write(buffer, 0, count);
-            return output.toString(StandardCharsets.UTF_8.name());
-        } catch (Exception ex) {
-            return "JSON.stringify({error: 'Не удалось загрузить probe.js'})";
+    @Override public void onBackPressed() {
+        if (showingCapture) {
+            showCapture(false);
+        } else if (appView.canGoBack()) {
+            appView.goBack();
+        } else {
+            super.onBackPressed();
         }
     }
 
     @Override protected void onDestroy() {
-        navigationCounter++;
-        browser.destroy();
+        captureSequence++;
+        saveSequence++;
+        sourceView.destroy();
+        appView.destroy();
         super.onDestroy();
     }
 }

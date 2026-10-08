@@ -1,4 +1,4 @@
-name: Android capture probe (isolated)
+name: Android Advisor (shared parser + real Buffer)
 on:
   push:
     branches:
@@ -28,26 +28,29 @@ jobs:
           packages: ''
       - name: Install Android platform
         run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
-      - name: Validate probe JavaScript syntax
-        run: node --check android-capture-probe/app/src/main/assets/probe.js
-      - name: Run parser regression tests
-        run: node --test android-capture-probe/tests/probe.test.cjs
+      - name: Check integration invariants
+        run: |
+          set -euo pipefail
+          grep -q 'https://app.moyadvisor.online' android-capture-probe/app/src/main/java/online/moyadvisor/captureprobe/MainActivity.java
+          grep -q '/api/android-capture/script' android-capture-probe/app/src/main/java/online/moyadvisor/captureprobe/MainActivity.java
+          grep -q '/api/wishlist-preview/save' android-capture-probe/app/src/main/java/online/moyadvisor/captureprobe/MainActivity.java
+          test ! -e android-capture-probe/app/src/main/assets/probe.js
       - name: Assemble debug APK
         working-directory: android-capture-probe
         run: gradle --no-daemon :app:assembleDebug
-      - name: Verify APK and inspect package
+      - name: Verify APK
         working-directory: android-capture-probe
         run: |
           set -euo pipefail
           APK=app/build/outputs/apk/debug/app-debug.apk
           test -s "$APK"
           unzip -t "$APK" | tail -1
-          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$APK" | head -4
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$APK" | head -5
           sha256sum "$APK"
-          cp "$APK" ../advisor-android-capture-test.apk
-      - name: Upload single installable APK
+          cp "$APK" ../Advisor-Android-Buffer-beta.apk
+      - name: Upload installable APK
         uses: actions/upload-artifact@v7
         with:
-          path: advisor-android-capture-test.apk
+          path: Advisor-Android-Buffer-beta.apk
           archive: false
           retention-days: 14
