@@ -4,6 +4,31 @@ This is **not** Personal Advisor and does not connect to the production database
 This proof-of-concept tests whether an Android WebView can open pages shared
 from mobile apps and read the DOM metadata needed for existing capture parsers.
 
+## v0.6: batch regression fixes from 9 live Android captures
+
+- Do not use unrelated JSON-LD events in KASSIR listings. Select an event
+  entity only if it matches the shared page URL, or an unambiguous visible
+  page title without a conflicting event URL; otherwise mark the draft unsafe.
+- Recognize Yandex Afisha `ChildrensEvent` and event paths such as
+  `/saint-petersburg/circus_show/...`, without confusing listings for events.
+- Reject generic city names as specific venues. Guard multi-year concert
+  schedule ranges: a definite performance date must be selected separately.
+- Prices displayed with bank cards or special Pay terms are candidates,
+  not universal prices; mark such product drafts for review.
+- Exclude advertising/static placeholders from event images; validate event
+  artwork as actual image URLs.
+- Reject Wildberries skeleton title `...`; retry a stalled page once after
+  12 seconds and preserve a previously better capture instead of overwriting it.
+- Extract Yandex Market numeric product IDs when present in `/card/...`
+  URLs. Convert game/book/movie years to numbers.
+- Add regression tests based on nine real Android diagnostic captures.
+- v0.5 batch sharing fix is included. No changes to production Advisor
+  or existing user data.
+
+**Important:** This debug app still uses per-run signatures. Export
+existing local history before uninstalling old versions. The already
+received nine-case report does not require retesting.
+
 ## v0.5: fix batch JSON file sharing and checked file saving
 
 - Root cause of the only-text message: v0.4 included Android EXTRA_TEXT alongside

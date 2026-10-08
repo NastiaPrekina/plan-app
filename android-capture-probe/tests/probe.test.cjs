@@ -44,7 +44,7 @@ test('Wildberries prioritizes product title over SALE tag and h1 rating',()=>{
     body:'Шины зимние 4 299 ₽ 4 387 ₽',
     images:[{url:'https://basket-29.wbbasket.ru/vol5699/part569909/569909841/images/big/1.webp',alt:'Product image 1',width:369,height:492}]
   });
-  assert.equal(o.version,4);
+  assert.equal(o.version,6);
   assert.equal(o.detectedCategory,'product');
   assert.equal(o.externalId,'569909841');
   assert.equal(o.captureTitle,'Шины зимние R15 185 65 88 T W01 ATTAR');
@@ -152,4 +152,107 @@ test('unknown pages are not fabricated as products',()=>{
   assert.equal(o.detectedCategory,'unknown');
   assert.equal(o.captureReady,false);
   assert.equal(o.capture,null);
+});
+
+
+test('Kassir rejects unrelated JSON-LD events and does not fabricate the excursion',()=>{
+  const o=run({
+    url:'https://spb.kassir.ru/tourist/ekskursiya-vo-vladimirskij-dvorec',
+    title:'Экскурсия во Владимирский дворец — Кассир',
+    og:{'og:title':'Экскурсия во Владимирский дворец'},
+    jsonLd:[
+      {'@type':'Event',name:'Василий Бейнарович, Фауст 21 века',url:'https://spb.kassir.ru/obrazovanie/vasiliy-beynarovich',
+        image:'https://spb.kassir.ru/obrazovanie/vasiliy-beynarovich#4053893',
+        startDate:'2027-02-20T19:00:00'},
+      {'@type':'MusicEvent',name:'Другой концерт',url:'https://spb.kassir.ru/koncert/other',
+        image:'https://img.kassir.ru/other.jpg',startDate:'2027-02-20T18:00:00'}
+    ],body:'Экскурсия во Владимирский дворец'
+  });
+  assert.equal(o.detectedCategory,'event');
+  assert.equal(o.captureReady,false);
+  assert.equal(o.eventMatchSource,'unverified');
+  assert.match(o.captureTitle,/Экскурсия во Владимирский дворец/);
+  assert.ok(!o.captureTitle.includes('Василий'));
+  assert.equal(o.captureImage,'');
+  assert.ok(o.missingFields.includes('Нет подтверждения события из разметки страницы'));
+});
+
+test('Yandex Afisha supports ChildrensEvent on circus_show URLs',()=>{
+  const o=run({
+    url:'https://afisha.yandex.ru/saint-petersburg/circus_show/shou-vody-ognia-i-sveta',
+    title:'Шоу воды, огня и света! — Яндекс Афиша',
+    jsonLd:[{'@type':'ChildrensEvent',name:'Шоу воды, огня и света!',
+      image:'https://avatars.mds.yandex.net/get-afishanew/133/poster.jpg',
+      startDate:'2027-05-10T18:00:00',location:{name:'Цирк',address:{streetAddress:'Набережная, 1',addressLocality:'Санкт-Петербург'}}}],
+    body:'Шоу воды, огня и света!'
+  });
+  assert.equal(o.detectedCategory,'event');
+  assert.equal(o.capture.title,'Шоу воды, огня и света!');
+  assert.equal(o.captureReady,true);
+  assert.equal(o.capture.activityType,'theatre_show');
+});
+
+test('KudaGo long-running exhibition cannot pass with generic city as venue',()=>{
+  const o=run({
+    url:'https://kudago.com/spb/event/psihologicheskie-vyistavki/',
+    title:'Психологические выставки в галерее «Путь»',
+    jsonLd:[{'@type':'Event',name:'Психологические выставки в галерее «Путь»',
+      image:'https://media.kudago.com/images/event/92/4a/poster.jpg',
+      startDate:'2025-10-10T18:00:11Z',endDate:'2026-10-12T21:00:00',
+      location:{name:'Санкт-Петербург',address:{streetAddress:'Санкт-Петербург, Россия'}}}],
+    body:'Выставка в темноте'
+  });
+  assert.equal(o.detectedCategory,'event');
+  assert.equal(o.captureReady,false);
+  assert.ok(o.missingFields.includes('Место проведения'));
+  assert.equal(o.capture.city,'Санкт-Петербург');
+});
+
+test('Yandex concert with multi-year schedule requires specific session',()=>{
+  const o=run({
+    url:'https://afisha.yandex.ru/saint-petersburg/concert/sergei-lazarev-shoumen',
+    title:'Сергей Лазарев — Шоумен',
+    jsonLd:[{'@type':'MusicEvent',name:'Сергей Лазарев',
+      image:'https://avatars.mds.yandex.net/get-afishanew/5109582/poster/orig',
+      startDate:'2025-10-10T21:00:00.000Z',endDate:'2026-10-10T21:00:00.000Z',
+      location:{name:'СКА Арена',address:{streetAddress:'просп. Юрия Гагарина, 8',addressLocality:'Санкт-Петербург'}}}]
+  });
+  assert.equal(o.detectedCategory,'event');
+  assert.equal(o.capture.category,'concert');
+  assert.equal(o.captureReady,false);
+  assert.ok(o.missingFields.includes('Дата и сеанс требуют уточнения'));
+});
+
+test('Ozon bank-only price is not silently treated as universal price',()=>{
+  const o=run({
+    url:'https://www.ozon.ru/product/shvabra-3424826081/',
+    title:'Швабра Smart Mop 2.0',
+    jsonLd:[{'@type':'Product',name:'Швабра Smart Mop 2.0',
+      image:'https://ir.ozone.ru/s3/multimedia/13543303487.jpg',offers:{price:3170}}],
+    body:'В приложении удобнее Похожие 2 853 ₽ С банками Скидка 3 170 ₽'
+  });
+  assert.equal(o.capturePriceCandidate,'2 853 ₽');
+  assert.equal(o.priceWarning,'Цена с условиями оплаты');
+  assert.equal(o.captureReady,false);
+});
+
+test('Yandex Market price with Pay is flagged and product ID extracted',()=>{
+  const o=run({
+    url:'https://market.yandex.ru/card/ryukzak/5899703611',
+    title:'Рюкзак',
+    jsonLd:[{'@type':'Product',name:'Рюкзак коричневый',image:'https://avatars.mds.yandex.net/get-mpic/4614113/picture/orig',offers:{price:1860}}],
+    body:'Коричневый 1 860 ₽ Пэй 3 304 ₽ -44%'
+  });
+  assert.equal(o.externalId,'5899703611');
+  assert.equal(o.priceWarning,'Цена с условиями оплаты');
+  assert.equal(o.captureReady,false);
+});
+
+test('Wildberries skeleton with ellipsis is not a valid title',()=>{
+  const o=run({url:'https://www.wildberries.ru/catalog/506134741/detail.aspx',
+    title:'...',body:''});
+  assert.equal(o.detectedCategory,'product');
+  assert.equal(o.captureReady,false);
+  assert.ok(o.missingFields.includes('Название'));
+  assert.ok(o.missingFields.includes('Изображение'));
 });

@@ -54,6 +54,7 @@ public class MainActivity extends Activity {
     private String probeScript;
     private String latestReport = "Отчёт пока не готов.";
     private int navigationCounter = 0;
+    private int autoRetryNavigation = -1;
     private boolean showingHistory = false;
     private JSONArray records = new JSONArray();
 
@@ -91,7 +92,7 @@ public class MainActivity extends Activity {
         root.setBackgroundColor(Color.WHITE);
         setContentView(root);
 
-        root.addView(label("Advisor · Android захват v0.5", 19));
+        root.addView(label("Advisor · Android захват v0.6", 19));
         TextView subtitle = label("Черновики сохраняются только на этом телефоне, не в Буфере Advisor.", 11);
         subtitle.setPadding(0, dp(3), 0, dp(5));
         root.addView(subtitle);
@@ -258,6 +259,7 @@ public class MainActivity extends Activity {
             }
             @Override public void onPageStarted(WebView view, String url, android.graphics.Bitmap icon) {
                 navigationCounter++;
+                autoRetryNavigation = -1;
                 status.setText("Открываю: " + url);
             }
             @Override public void onPageFinished(WebView view, String url) {
@@ -337,6 +339,13 @@ public class MainActivity extends Activity {
                 latestReport = result.toString(2);
                 if (!result.has("error")) {
                     recordCapture(result);
+                    if ("wildberries".equals(result.optString("sourceProvider"))
+                            && !result.optBoolean("captureReady", false)
+                            && autoRetryNavigation != count) {
+                        autoRetryNavigation = count;
+                        status.setText("Wildberries пока отдал неполную страницу. Перепроверю один раз позже.");
+                        handler.postDelayed(() -> { if (count == navigationCounter) probe(count); }, 12000);
+                    }
                     String category = categoryName(result.optString("detectedCategory"));
                     String suffix = result.optBoolean("captureReady") ? "основные поля найдены" : "нужна проверка полей";
                     status.setText(category + ": " + suffix + ". Сохранено локально.");
@@ -356,7 +365,7 @@ public class MainActivity extends Activity {
     private void storeFailure(String title, String url, String reason) {
         try {
             JSONObject failure = new JSONObject();
-            failure.put("version", 4);
+            failure.put("version", 6);
             failure.put("pageUrl", url);
             failure.put("detectedCategory", "unknown");
             failure.put("captureTitle", title);
@@ -374,7 +383,8 @@ public class MainActivity extends Activity {
                 "captureReady", "missingFields", "captureTitle", "titleSource",
                 "captureImage", "capturePriceCandidate", "priceCandidates",
                 "priceObservations", "structuredPrice", "imageOptions",
-                "yearCandidate", "genres", "originalTitle", "problemHint", "capture", "jsonLdTypes"
+                "yearCandidate", "genres", "originalTitle", "problemHint", "capture", "jsonLdTypes",
+                "eventMatchSource", "priceWarning", "pageTitle", "readyState", "ogTitle"
             };
             for (String key : keys) if (result.has(key)) reduced.put(key, result.get(key));
             reduced.put("pageUrl", withoutTracking(result.optString("pageUrl", "")));
@@ -386,7 +396,14 @@ public class MainActivity extends Activity {
             next.put(reduced);
             for (int i = 0; i < records.length() && next.length() < MAX_RECORDS; i++) {
                 JSONObject item = records.optJSONObject(i);
-                if (item == null || identity.equals(item.optString("_key"))) continue;
+                if (item == null) continue;
+                if (identity.equals(item.optString("_key"))) {
+                    // Never replace a correctly loaded card with a later skeleton/error response.
+                    if (captureQuality(item) > captureQuality(reduced)) {
+                        return;
+                    }
+                    continue;
+                }
                 next.put(item);
             }
             records = next;
@@ -395,6 +412,17 @@ public class MainActivity extends Activity {
         } catch (Exception ex) {
             status.setText("Не удалось сохранить локальный результат: " + ex.getMessage());
         }
+    }
+
+    private static int captureQuality(JSONObject result) {
+        int score = result.optBoolean("captureReady", false) ? 100 : 0;
+        if (result.optString("captureTitle").length() >= 5
+                && !"...".equals(result.optString("captureTitle"))) score += 10;
+        if (!result.optString("captureImage").isEmpty()) score += 10;
+        if (!result.optString("capturePriceCandidate").isEmpty()) score += 4;
+        JSONArray missing = result.optJSONArray("missingFields");
+        if (missing != null) score -= missing.length() * 2;
+        return score;
     }
 
     private static String stableKey(String url, String id) {
@@ -427,7 +455,7 @@ public class MainActivity extends Activity {
         JSONObject output = new JSONObject();
         try {
             output.put("format", "advisor-android-probe");
-            output.put("version", 4);
+            output.put("version", 6);
             output.put("note", "Локальные диагностические результаты. Не сохранено в Буфер.");
             output.put("captures", records);
         } catch (Exception ignored) {}
