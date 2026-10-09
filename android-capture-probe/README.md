@@ -1,4 +1,40 @@
-# Advisor Android v0.8 beta: offline capture with deferred Buffer sync
+# Advisor Android v0.9 beta: normal full-screen app + reliable account binding
+
+## What changed
+
+- The main screen is **only the regular Advisor web app**, with its own
+  navigation (Для меня, Планы, Библиотека, Поездки, etc.). The separate
+  native toolbar with Advisor / Buffer / Send / Capture has been removed.
+- The native capture screen appears only after Android's **Share → Advisor**
+  action. It has a compact heading, close, the captured card and a save button.
+- Critical offline-share fix: opening a shared Ozon/WB URL on a cold start does
+  **not load or reload** the Advisor website while VPN is off. The authenticated
+  page is preserved in its WebView across share intents.
+- Auth fix: account verification uses a trusted **same-origin fetch inside the
+  logged-in Advisor WebView** to GET /api/android-capture/session, rather than
+  a separate native HTTP client that manually replays cookies. Queue syncing
+  also posts via that same authenticated browser session.
+- Auth verification is retried after app navigation/login and on foreground
+  resume; the private queue remains strictly bound to a server-verified user ID.
+  Switching accounts cannot upload the previous user's captures.
+- Offline capture still uses the bundled unmodified Browser Helper parser.
+  Captures are queued locally and only sent when Advisor becomes reachable.
+- The normal app supports Android's system file picker for web file uploads.
+- No server/database migration or change to existing Buffer save APIs.
+
+## Testing
+
+1. Start Advisor under VPN and sign into your normal account inside the app.
+   There is **no extra native navigation bar**. The main UI is the website.
+2. Turn VPN off. Share an Ozon product via Android Share → Advisor.
+   The external page is parsed without contacting app.moyadvisor.online.
+3. Save the card. It should say saved **on the phone**.
+4. Restore VPN, open Advisor normally, and allow the app to upload its queue.
+   The item should appear in the real Buffer.
+5. If a queued item was left from v0.8, **do not uninstall the old APK** before
+   successfully syncing it. Debug signatures can vary between Actions builds.
+
+## Previous v0.8 notes
 
 ## VPN-independent capture
 

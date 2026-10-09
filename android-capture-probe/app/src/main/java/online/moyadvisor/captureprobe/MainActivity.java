@@ -1,348 +1,426 @@
 package online.moyadvisor.captureprobe;
 
 import android.app.Activity;
-import android.os.Bundle;
-import android.os.Handler;
-import android.os.Looper;
 import android.content.Intent;
 import android.graphics.Color;
 import android.net.Uri;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.view.Gravity;
+import android.view.View;
 import android.webkit.CookieManager;
 import android.webkit.WebChromeClient;
+import android.webkit.WebResourceError;
+import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
-import android.webkit.WebResourceRequest;
-import android.webkit.WebResourceError;
-import android.view.View;
 import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
+import android.view.WindowManager;
+import android.webkit.ValueCallback;
 import org.json.JSONObject;
 import org.json.JSONTokener;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
-import java.net.HttpURLConnection;
-import java.net.URL;
+import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * The actual Advisor website is the user interface and the source of auth.
- * An isolated WebView reads shared public pages with the shared server parser.
- * It never receives a native JavaScript bridge, token, or Advisor cookies.
- * User-approved saves are sent from the authenticated Advisor WebView to the
- * EXISTING per-category server endpoints, bound to that session's userId.
+ * The ordinary Advisor web UI is the entire Android app.
+ * Only Android ACTION_SEND opens a temporary native Capture overlay.
+ *
+ * Authentication and Buffer writes are checked INSIDE the trusted Advisor
+ * WebView with same-origin fetch, never by exporting cookies to native HTTP.
+ * Source websites run in a separate, JS-bridge-free WebView and never see
+ * Advisor auth. The shared desktop parser is bundled for VPN-free capture.
  */
-public class MainActivity extends Activity {
-    private static final String APP_ORIGIN = "https://app.moyadvisor.online";
-    private static final String APP_HOST = "app.moyadvisor.online";
-    private static final String SESSION_URL = APP_ORIGIN + "/api/android-capture/session";
-    private static final Pattern HTTPS_LINK = Pattern.compile("https://[^\\s<>\"']+", Pattern.CASE_INSENSITIVE);
+public final class MainActivity extends Activity {
+    private static final String ORIGIN = "https://app.moyadvisor.online";
+    private static final String HOST = "app.moyadvisor.online";
+    private static final Pattern LINK = Pattern.compile("https://[^\\s<>\"']+", Pattern.CASE_INSENSITIVE);
+    private static final int FILE_PICKER_CODE = 603;
     private final Handler handler = new Handler(Looper.getMainLooper());
-    private WebView appView, sourceView;
-    private LinearLayout captureScreen;
-    private TextView message, preview;
-    private Button saveButton;
-    private boolean showingCapture = false;
-    private boolean saveBusy = false;
-    private int captureSequence = 0;
-    private int saveSequence = 0;
-    private JSONObject currentCapture;
-    private String parserScript;
-    private String sharedUrl;
     private PendingCaptureStore pending;
-    private TextView queueStatus;
-    private boolean checkingSession = false;
-    private long lastSessionCheck = 0;
+    private WebView advisor, source;
+    private LinearLayout captureLayer;
+    private TextView status, queueInfo, preview;
+    private Button saveButton;
+    private ValueCallback<Uri[]> uploadCallback;
+    private String sharedUrl, parser;
+    private JSONObject currentCapture;
+    private boolean captureVisible = false, sessionBusy = false, syncBusy = false;
+    private int captureGeneration = 0, saveGeneration = 0, sessionGeneration = 0;
+    private long lastSessionCheckAt = 0;
+    private String currentSyncOwner = "";
+    private int syncedThisPass = 0;
 
-    @Override public void onCreate(Bundle state) {
-        super.onCreate(state);
+    @Override public void onCreate(Bundle saved) {
+        super.onCreate(saved);
         pending = new PendingCaptureStore(this);
         buildUi();
-        appView.loadUrl(APP_ORIGIN + "/capture");
-        handleShare(getIntent());
+        // Critical: an ACTION_SEND can arrive while VPN is OFF. Never load
+        // Advisor then: doing so would replace the user's working page with an
+        // offline/error/login state and make previously verified auth look lost.
+        if (isSharedIntent(getIntent())) {
+            handleSharedIntent(getIntent());
+        } else {
+            openAdvisor();
+        }
+        handler.postDelayed(this::periodicAccountCheck, 7000);
     }
 
     @Override protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
-        handleShare(intent);
+        if (isSharedIntent(intent)) handleSharedIntent(intent);
     }
 
-    private int dp(int value) {
-        return Math.round(value * getResources().getDisplayMetrics().density);
+    private boolean isSharedIntent(Intent intent) {
+        return intent != null && Intent.ACTION_SEND.equals(intent.getAction());
     }
 
-    private TextView makeText(String value, int size) {
+    private int dp(int number) {
+        return Math.round(number * getResources().getDisplayMetrics().density);
+    }
+
+    private TextView text(String value, int size) {
         TextView view = new TextView(this);
         view.setText(value);
         view.setTextSize(size);
-        view.setTextColor(Color.rgb(45, 53, 55));
+        view.setTextColor(Color.rgb(40, 48, 50));
         return view;
     }
 
-    private Button addButton(LinearLayout row, String text, View.OnClickListener callback) {
+    private Button button(String value, View.OnClickListener onClick) {
         Button button = new Button(this);
-        button.setText(text);
-        button.setTextSize(12);
         button.setAllCaps(false);
-        button.setOnClickListener(callback);
-        row.addView(button, new LinearLayout.LayoutParams(0, dp(46), 1));
+        button.setText(value);
+        button.setTextSize(13);
+        button.setOnClickListener(onClick);
         return button;
     }
 
-    private void configureWebView(WebView view) {
-        WebSettings settings = view.getSettings();
-        settings.setJavaScriptEnabled(true);
-        settings.setDomStorageEnabled(true);
-        settings.setAllowFileAccess(false);
-        settings.setAllowContentAccess(false);
-        settings.setAllowFileAccessFromFileURLs(false);
-        settings.setAllowUniversalAccessFromFileURLs(false);
-        settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
-        settings.setSupportMultipleWindows(false);
-        settings.setSafeBrowsingEnabled(true);
+    private void webSettings(WebView webview) {
+        WebSettings s = webview.getSettings();
+        s.setJavaScriptEnabled(true);
+        s.setDomStorageEnabled(true);
+        s.setAllowFileAccess(false);
+        s.setAllowContentAccess(false);
+        s.setAllowFileAccessFromFileURLs(false);
+        s.setAllowUniversalAccessFromFileURLs(false);
+        s.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
+        s.setSupportMultipleWindows(false);
+        s.setSafeBrowsingEnabled(true);
         CookieManager.getInstance().setAcceptCookie(true);
-        CookieManager.getInstance().setAcceptThirdPartyCookies(view, false);
-        view.setWebChromeClient(new WebChromeClient());
+        CookieManager.getInstance().setAcceptThirdPartyCookies(webview, false);
+        webview.setBackgroundColor(Color.WHITE);
+    }
+
+    private boolean advisorHost(String input) {
+        try {
+            Uri uri = Uri.parse(input);
+            return "https".equalsIgnoreCase(uri.getScheme()) && HOST.equalsIgnoreCase(uri.getHost());
+        } catch (Exception ignored) { return false; }
+    }
+
+    private void showExternalUrl(Uri uri) {
+        if (!"https".equalsIgnoreCase(uri.getScheme())) return;
+        try { startActivity(new Intent(Intent.ACTION_VIEW, uri)); }
+        catch (Exception error) { Toast.makeText(this, "Не удалось открыть ссылку", Toast.LENGTH_SHORT).show(); }
     }
 
     private void buildUi() {
-        LinearLayout root = new LinearLayout(this);
+        getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+        getWindow().setStatusBarColor(Color.WHITE);
+        getWindow().setNavigationBarColor(Color.BLACK);
+        getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);
+        FrameLayout root = new FrameLayout(this);
         root.setBackgroundColor(Color.WHITE);
-        root.setOrientation(LinearLayout.VERTICAL);
         setContentView(root);
-        LinearLayout toolbar = new LinearLayout(this);
-        toolbar.setOrientation(LinearLayout.HORIZONTAL);
-        root.addView(toolbar, new LinearLayout.LayoutParams(-1, dp(50)));
-        addButton(toolbar, "Advisor", v -> openAdvisor(APP_ORIGIN + "/"));
-        addButton(toolbar, "Буфер", v -> openAdvisor(APP_ORIGIN + "/capture"));
-        addButton(toolbar, "Отправить", v -> checkSessionAndSync(true));
-        addButton(toolbar, "Захват", v -> {
-            if (sharedUrl == null) {
-                Toast.makeText(this, "Откройте карточку в другом приложении → Поделиться → Advisor", Toast.LENGTH_LONG).show();
-                return;
-            }
-            showCapture(true);
-        });
 
-        FrameLayout frame = new FrameLayout(this);
-        root.addView(frame, new LinearLayout.LayoutParams(-1, 0, 1));
-        appView = new WebView(this);
-        configureWebView(appView);
-        appView.setWebViewClient(new WebViewClient() {
-            @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-                return !"https".equalsIgnoreCase(request.getUrl().getScheme());
-            }
-            @Override public void onPageFinished(WebView view, String url) {
-                CookieManager.getInstance().flush();
-                if (url.startsWith(APP_ORIGIN) && !url.contains("/login")) {
-                    checkSessionAndSync(false);
+        advisor = new WebView(this);
+        webSettings(advisor);
+        advisor.setWebChromeClient(new WebChromeClient() {
+            @Override public boolean onShowFileChooser(WebView view,
+                    ValueCallback<Uri[]> callback, FileChooserParams params) {
+                if (uploadCallback != null) uploadCallback.onReceiveValue(null);
+                uploadCallback = callback;
+                try {
+                    startActivityForResult(params.createIntent(), FILE_PICKER_CODE);
+                    return true;
+                } catch (Exception exception) {
+                    uploadCallback = null;
+                    return false;
                 }
             }
         });
-        frame.addView(appView, new FrameLayout.LayoutParams(-1, -1));
-
-        captureScreen = new LinearLayout(this);
-        captureScreen.setOrientation(LinearLayout.VERTICAL);
-        captureScreen.setPadding(dp(9), dp(5), dp(9), dp(5));
-        captureScreen.setBackgroundColor(Color.WHITE);
-        frame.addView(captureScreen, new FrameLayout.LayoutParams(-1, -1));
-        captureScreen.setVisibility(View.GONE);
-
-        queueStatus = makeText("Очередь Буфера: 0", 12);
-        queueStatus.setPadding(dp(4), dp(3), dp(4), dp(5));
-        captureScreen.addView(queueStatus);
-        message = makeText("Поделитесь ссылкой на карточку.", 13);
-        message.setPadding(dp(4), dp(4), dp(4), dp(7));
-        captureScreen.addView(message);
-
-        sourceView = new WebView(this);
-        configureWebView(sourceView);
-        sourceView.setWebViewClient(new WebViewClient() {
-            @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-                return !"https".equalsIgnoreCase(request.getUrl().getScheme());
+        advisor.setWebViewClient(new WebViewClient() {
+            @Override public void onPageStarted(WebView view, String url, android.graphics.Bitmap icon) {
+                // A login redirect replaces the JavaScript realm. Any previous
+                // session check or write is no longer authoritative.
+                sessionGeneration++;
+                saveGeneration++;
+                sessionBusy = false;
+                syncBusy = false;
             }
-            @Override public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
-                captureSequence++;
-                currentCapture = null;
-                updatePreview(null);
-                message.setText("Загружается страница источника…");
+            @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                if (!request.isForMainFrame()) return false;
+                Uri uri = request.getUrl();
+                if (advisorHost(uri.toString())) return false;
+                showExternalUrl(uri);
+                return true;
             }
             @Override public void onPageFinished(WebView view, String url) {
-                int current = captureSequence;
-                handler.postDelayed(() -> loadSharedParser(current), 500);
+                if (!advisorHost(url)) return;
+                CookieManager.getInstance().flush();
+                // Login is an app route/redirect. Follow it with several checks,
+                // because Supabase cookies may be set AFTER onPageFinished.
+                handler.postDelayed(() -> verifySession(false), 500);
+                handler.postDelayed(() -> verifySession(false), 4500);
+                handler.postDelayed(() -> verifySession(false), 13500);
+            }
+        });
+        root.addView(advisor, new FrameLayout.LayoutParams(-1, -1));
+
+        captureLayer = new LinearLayout(this);
+        captureLayer.setOrientation(LinearLayout.VERTICAL);
+        captureLayer.setBackgroundColor(Color.WHITE);
+        captureLayer.setPadding(dp(12), dp(4), dp(12), dp(10));
+        root.addView(captureLayer, new FrameLayout.LayoutParams(-1, -1));
+        captureLayer.setVisibility(View.GONE);
+
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.HORIZONTAL);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        captureLayer.addView(header, new LinearLayout.LayoutParams(-1, dp(54)));
+        TextView heading = text("Добавить в Буфер", 19);
+        heading.setTypeface(null, 1);
+        header.addView(heading, new LinearLayout.LayoutParams(0, -2, 1));
+        Button close = button("✕", v -> leaveCapture());
+        close.setContentDescription("Закрыть захват");
+        header.addView(close, new LinearLayout.LayoutParams(dp(52), dp(48)));
+
+        queueInfo = text("", 12);
+        queueInfo.setPadding(dp(4), dp(3), dp(4), dp(5));
+        queueInfo.setOnClickListener(v -> {
+            if (!captureVisible) return;
+            if (!advisorHost(advisor.getUrl())) {
+                status.setText("Для отправки включите VPN и откройте Advisor.");
+            } else {
+                verifySession(true);
+            }
+        });
+        captureLayer.addView(queueInfo);
+
+        status = text("Открываю страницу товара…", 14);
+        status.setPadding(dp(4), dp(7), dp(4), dp(10));
+        captureLayer.addView(status);
+
+        // A separate WebView is required for rendering source DOM. It stays
+        // behind an opaque, non-interactive preview while it loads, so the
+        // user sees Advisor's capture UI, not a second browser application.
+        FrameLayout worker = new FrameLayout(this);
+        captureLayer.addView(worker, new LinearLayout.LayoutParams(-1, 0, 1));
+        source = new WebView(this);
+        webSettings(source);
+        source.setWebChromeClient(new WebChromeClient());
+        source.setWebViewClient(new WebViewClient() {
+            @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                if (!request.isForMainFrame()) return false;
+                Uri target = request.getUrl();
+                if ("https".equalsIgnoreCase(target.getScheme()) && !HOST.equalsIgnoreCase(target.getHost())) return false;
+                status.setText("Нельзя читать служебную страницу вместо товара.");
+                return true;
+            }
+            @Override public void onPageStarted(WebView view, String url, android.graphics.Bitmap icon) {
+                captureGeneration++;
+                currentCapture = null;
+                setPreview(null);
+                status.setText("Загружаю карточку…");
+            }
+            @Override public void onPageFinished(WebView view, String url) {
+                int generation = captureGeneration;
+                handler.postDelayed(() -> injectParser(generation), 350);
             }
             @Override public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
-                if (request.isForMainFrame()) {
-                    message.setText("Не удалось открыть страницу источника: " + error.getDescription());
-                }
+                if (request.isForMainFrame()) status.setText("Страница не открылась: " + error.getDescription());
             }
         });
-        captureScreen.addView(sourceView, new LinearLayout.LayoutParams(-1, 0, 1));
+        worker.addView(source, new FrameLayout.LayoutParams(-1, -1));
+        LinearLayout overlay = new LinearLayout(this);
+        overlay.setOrientation(LinearLayout.VERTICAL);
+        overlay.setBackgroundColor(Color.rgb(248, 250, 249));
+        overlay.setGravity(Gravity.CENTER);
+        TextView hint = text("Карточка распознаётся на телефоне.\nVPN для этого не требуется.", 14);
+        hint.setGravity(Gravity.CENTER);
+        hint.setPadding(dp(28), dp(14), dp(28), dp(14));
+        overlay.addView(hint);
+        worker.addView(overlay, new FrameLayout.LayoutParams(-1, -1));
 
         ScrollView scroller = new ScrollView(this);
-        captureScreen.addView(scroller, new LinearLayout.LayoutParams(-1, dp(137)));
-        preview = makeText("После загрузки появится предварительная карточка.", 13);
+        captureLayer.addView(scroller, new LinearLayout.LayoutParams(-1, dp(165)));
+        preview = text("Данные появятся после распознавания.", 14);
         preview.setTextIsSelectable(true);
-        preview.setPadding(dp(7), dp(7), dp(7), dp(7));
+        preview.setPadding(dp(8), dp(12), dp(8), dp(12));
         scroller.addView(preview);
 
         LinearLayout actions = new LinearLayout(this);
-        actions.setOrientation(LinearLayout.HORIZONTAL);
-        captureScreen.addView(actions, new LinearLayout.LayoutParams(-1, dp(52)));
-        addButton(actions, "Повторить", v -> retryCapture());
-        saveButton = addButton(actions, "В очередь Буфера", v -> saveToBuffer());
+        captureLayer.addView(actions, new LinearLayout.LayoutParams(-1, dp(54)));
+        Button retry = button("Повторить", v -> retry());
+        actions.addView(retry, new LinearLayout.LayoutParams(0, -1, 1));
+        saveButton = button("Сохранить", v -> enqueue());
         saveButton.setEnabled(false);
-        addButton(actions, "Войти", v -> openAdvisor(APP_ORIGIN + "/capture"));
-        updateQueueStatus();
+        actions.addView(saveButton, new LinearLayout.LayoutParams(0, -1, 2));
+        showQueueCount();
     }
 
-    private void openAdvisor(String url) {
-        showCapture(false);
-        appView.loadUrl(url);
-        checkSessionAndSync(false);
+    @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != FILE_PICKER_CODE || uploadCallback == null) return;
+        uploadCallback.onReceiveValue(
+            WebChromeClient.FileChooserParams.parseResult(resultCode, data));
+        uploadCallback = null;
     }
 
     private void showCapture(boolean visible) {
-        showingCapture = visible;
-        captureScreen.setVisibility(visible ? View.VISIBLE : View.GONE);
-        appView.setVisibility(visible ? View.GONE : View.VISIBLE);
+        captureVisible = visible;
+        captureLayer.setVisibility(visible ? View.VISIBLE : View.GONE);
+        advisor.setVisibility(visible ? View.INVISIBLE : View.VISIBLE);
     }
 
-    private static String firstHttps(String raw) {
-        if (raw == null) return null;
-        Matcher matcher = HTTPS_LINK.matcher(raw);
+    private void openAdvisor() {
+        showCapture(false);
+        if (advisor.getUrl() == null) advisor.loadUrl(ORIGIN + "/");
+        else verifySession(false);
+    }
+
+    private void leaveCapture() {
+        showCapture(false);
+        if (advisor.getUrl() == null) advisor.loadUrl(ORIGIN + "/");
+        else verifySession(false);
+    }
+
+    private String firstHttps(String text) {
+        if (text == null) return null;
+        Matcher matcher = LINK.matcher(text);
         if (!matcher.find()) return null;
-        String value = matcher.group();
-        while (value.endsWith(".") || value.endsWith(",") || value.endsWith(")") || value.endsWith("]")) {
-            value = value.substring(0, value.length() - 1);
+        String result = matcher.group();
+        while (result.endsWith(".") || result.endsWith(",")
+                || result.endsWith(")") || result.endsWith("]")) {
+            result = result.substring(0, result.length() - 1);
         }
         try {
-            Uri url = Uri.parse(value);
-            return "https".equalsIgnoreCase(url.getScheme()) && url.getHost() != null ? value : null;
-        } catch (Exception ignored) {
-            return null;
-        }
+            Uri uri = Uri.parse(result);
+            return "https".equalsIgnoreCase(uri.getScheme()) && uri.getHost() != null
+                && !HOST.equalsIgnoreCase(uri.getHost()) ? result : null;
+        } catch (Exception exception) { return null; }
     }
 
-    private void handleShare(Intent intent) {
-        if (intent == null || !Intent.ACTION_SEND.equals(intent.getAction())) return;
-        String raw = intent.getStringExtra(Intent.EXTRA_TEXT);
-        if (raw == null || raw.isEmpty()) raw = intent.getStringExtra(Intent.EXTRA_HTML_TEXT);
-        String url = firstHttps(raw);
+    private void handleSharedIntent(Intent intent) {
+        String payload = intent.getStringExtra(Intent.EXTRA_TEXT);
+        if (payload == null || payload.isEmpty()) payload = intent.getStringExtra(Intent.EXTRA_HTML_TEXT);
+        String url = firstHttps(payload);
+        showCapture(true);
+        currentCapture = null;
+        setPreview(null);
+        showQueueCount();
         if (url == null) {
-            showCapture(true);
-            message.setText("В сообщении нет HTTPS-ссылки на карточку.");
+            status.setText("Не удалось найти ссылку HTTPS. Попробуйте «Поделиться» ещё раз.");
             return;
         }
         sharedUrl = url;
-        currentCapture = null;
-        saveBusy = false;
-        showCapture(true);
-        sourceView.loadUrl(url);
+        source.loadUrl(url);
     }
 
-    private void retryCapture() {
-        currentCapture = null;
-        updatePreview(null);
-        if (sourceView.getUrl() == null) {
-            if (sharedUrl != null) sourceView.loadUrl(sharedUrl);
-        } else {
-            loadSharedParser(captureSequence);
-        }
-    }
-
-    private String bundledParser() {
-        if (parserScript != null) return parserScript;
+    private String sharedParser() {
+        if (parser != null) return parser;
         try (InputStream input = getAssets().open("shared-parser.js");
              ByteArrayOutputStream output = new ByteArrayOutputStream()) {
-            byte[] buffer = new byte[8192];
-            int len;
-            while ((len = input.read(buffer)) != -1) {
-                if (output.size() + len > 400_000) {
-                    throw new IllegalStateException("Слишком большой общий парсер.");
-                }
-                output.write(buffer, 0, len);
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = input.read(buf)) >= 0) {
+                if (output.size() + n > 400000) throw new IllegalStateException("Слишком большой парсер");
+                output.write(buf, 0, n);
             }
-            String script = output.toString(StandardCharsets.UTF_8.name());
-            if (!script.contains("captureForKind") || !script.contains("__paAndroidCaptureResult")) {
-                throw new IllegalStateException("В APK отсутствует общий парсер Advisor.");
-            }
-            parserScript = script;
-            return parserScript;
-        } catch (Exception error) {
-            message.setText("Не удалось открыть встроенный парсер: " + error.getMessage());
+            String result = output.toString(StandardCharsets.UTF_8.name());
+            if (!result.contains("captureForKind") || !result.contains("__paAndroidCaptureResult"))
+                throw new IllegalStateException("Не найдена общая логика распознавания");
+            parser = result;
+            return result;
+        } catch (Exception ex) {
+            status.setText("Ошибка встроенного парсера: " + ex.getMessage());
             return null;
         }
     }
 
-    private void loadSharedParser(int sequence) {
-        if (sequence != captureSequence) return;
-        String script = bundledParser();
+    private void retry() {
+        setPreview(null);
+        if (source.getUrl() == null && sharedUrl != null) source.loadUrl(sharedUrl);
+        else injectParser(captureGeneration);
+    }
+
+    private void injectParser(int generation) {
+        if (generation != captureGeneration || !captureVisible) return;
+        String script = sharedParser();
         if (script == null) return;
-        message.setText("Распознаю карточку локальным парсером Advisor…");
-        sourceView.evaluateJavascript(script, value -> {
-            if (sequence == captureSequence) pollCapture(sequence, 0);
+        status.setText("Распознаю карточку…");
+        source.evaluateJavascript(script, ignored -> {
+            if (generation == captureGeneration) pollCapture(generation, 0);
         });
     }
 
-    private JSONObject jsonFromJavascript(String value) {
+    private JSONObject decoded(String value) {
         try {
-            Object decoded = new JSONTokener(value).nextValue();
-            String data = decoded instanceof String ? (String) decoded : String.valueOf(decoded);
-            return new JSONObject(data);
-        } catch (Exception ignored) {
-            return null;
-        }
+            Object parsed = new JSONTokener(value).nextValue();
+            return new JSONObject(parsed instanceof String ? (String) parsed : String.valueOf(parsed));
+        } catch (Exception exception) { return null; }
     }
 
-    private void pollCapture(int sequence, int attempt) {
-        if (sequence != captureSequence) return;
-        if (attempt > 20) {
-            message.setText("Источник отвечает слишком долго. Попробуйте ещё раз.");
+    private void pollCapture(int generation, int step) {
+        if (generation != captureGeneration || !captureVisible) return;
+        if (step > 22) {
+            status.setText("Не удалось завершить захват. Попробуйте ещё раз.");
             return;
         }
-        handler.postDelayed(() -> sourceView.evaluateJavascript(
+        handler.postDelayed(() -> source.evaluateJavascript(
             "JSON.stringify(window.__paAndroidCaptureResult || null)", raw -> {
-                if (sequence != captureSequence) return;
-                JSONObject result = jsonFromJavascript(raw);
+                if (generation != captureGeneration || !captureVisible) return;
+                JSONObject result = decoded(raw);
                 if (result == null || !result.optBoolean("done")) {
-                    pollCapture(sequence, attempt + 1);
+                    pollCapture(generation, step + 1);
                     return;
                 }
                 JSONObject capture = result.optJSONObject("capture");
                 if (capture == null) {
-                    message.setText(result.optString("error", "Карточка не распознана. Повторите попытку."));
-                    updatePreview(null);
+                    status.setText(result.optString("error", "Карточка не распознана."));
                     return;
                 }
-                String original = capture.optString("sourceUrl", "");
-                String current = sourceView.getUrl();
-                if (!"https".equalsIgnoreCase(Uri.parse(original).getScheme())
-                    || current == null
-                    || !original.equals(current) && !original.equals(current.split("\\?")[0])
-                    && !(Uri.parse(current).getHost() != null
-                        && Uri.parse(current).getHost().equalsIgnoreCase(Uri.parse(original).getHost()))) {
-                    message.setText("Ссылка карточки не совпадает с открытым источником. Сохранение отменено.");
-                    updatePreview(null);
+                Uri origin = Uri.parse(capture.optString("sourceUrl", ""));
+                Uri current = Uri.parse(source.getUrl() == null ? "" : source.getUrl());
+                if (!"https".equalsIgnoreCase(origin.getScheme())
+                        || origin.getHost() == null || current.getHost() == null
+                        || !origin.getHost().equalsIgnoreCase(current.getHost())) {
+                    status.setText("Источник карточки не соответствует открытой странице.");
                     return;
                 }
                 currentCapture = capture;
-                updatePreview(capture);
-                message.setText(result.optBoolean("incomplete")
-                    ? "Карточка распознана не полностью — проверьте поля перед сохранением."
-                    : "Карточка готова к проверке. Сохранение только по нажатию.");
-            }), 1000);
+                setPreview(capture);
+                status.setText(result.optBoolean("incomplete")
+                    ? "Некоторые поля неполные — проверьте данные перед сохранением."
+                    : "Проверьте карточку и нажмите «Сохранить».");
+            }), 550);
     }
 
-    private String categoryName(String type) {
-        switch (type) {
+    private String categoryName(String kind) {
+        switch (kind) {
             case "product": return "Товар";
             case "game": return "Игра";
             case "screen": return "Фильм / сериал";
@@ -354,238 +432,234 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void updatePreview(JSONObject capture) {
-        if (capture == null) {
-            preview.setText("Предпросмотр пока недоступен.");
-            saveButton.setEnabled(false);
-            return;
-        }
-        String type = capture.optString("kind", "");
-        String title = capture.optString("title", "");
-        StringBuilder details = new StringBuilder(categoryName(type)).append(": ").append(title);
-        if (capture.has("price") && !capture.isNull("price")) {
-            details.append("\nЦена: ").append(capture.optString("price"))
-                .append(" ").append(capture.optString("currency", ""));
-        }
-        if (capture.has("startDate") && !capture.isNull("startDate")) {
-            details.append("\nДата: ").append(capture.optString("startDate"));
-        }
-        if (capture.has("venueName") && !capture.isNull("venueName")) {
-            details.append("\nМесто: ").append(capture.optString("venueName"));
-        }
-        details.append("\nИсточник: ").append(capture.optString("sourceUrl", ""));
-        preview.setText(details.toString());
-        saveButton.setEnabled(!saveBusy && title.trim().length() > 3 && !title.trim().equals("..."));
-    }
-
-    private String endpointForKind(String kind) {
+    private String endpoint(String kind) {
         switch (kind) {
+            case "product": return "/api/wishlist-preview/save";
             case "game": return "/api/browser-capture/steam";
             case "screen": return "/api/browser-capture/screen";
             case "book": return "/api/browser-capture/book";
             case "event": return "/api/browser-capture/event";
             case "place": return "/api/browser-capture/place";
             case "hotel": return "/api/browser-capture/hotel";
-            case "product": return "/api/wishlist-preview/save";
             default: return null;
         }
     }
 
-    private void updateQueueStatus() {
-        if (queueStatus == null || pending == null) return;
-        String owner = pending.owner();
-        int count = owner.isEmpty() ? pending.totalCount() : pending.countFor(owner);
-        queueStatus.setText("На телефоне: " + count + " ожидают отправки в Буфер"
-            + (owner.isEmpty() ? " · сначала войдите в Advisor с VPN" : ""));
-    }
-
-    private void saveToBuffer() {
-        if (currentCapture == null || saveBusy) return;
-        if (endpointForKind(currentCapture.optString("kind")) == null) {
-            message.setText("Неизвестный тип карточки. Захват не сохранён.");
+    private void setPreview(JSONObject card) {
+        if (card == null) {
+            preview.setText("Данные появятся после распознавания.");
+            saveButton.setEnabled(false);
             return;
         }
+        String title = card.optString("title", "");
+        StringBuilder body = new StringBuilder(categoryName(card.optString("kind")))
+            .append("\n").append(title);
+        if (!card.isNull("price") && card.has("price"))
+            body.append("\nЦена: ").append(card.optString("price")).append(" ").append(card.optString("currency"));
+        if (!card.optString("startDate").isEmpty()) body.append("\nДата: ").append(card.optString("startDate"));
+        if (!card.optString("venueName").isEmpty()) body.append("\nМесто: ").append(card.optString("venueName"));
+        body.append("\nИсточник: ").append(card.optString("sourceUrl"));
+        preview.setText(body.toString());
+        saveButton.setEnabled(endpoint(card.optString("kind")) != null
+            && title.trim().length() >= 4 && !title.trim().equals("..."));
+    }
+
+    private void showQueueCount() {
+        if (queueInfo == null || pending == null) return;
+        String owner = pending.owner();
+        int count = owner.isEmpty() ? pending.totalCount() : pending.countFor(owner);
+        queueInfo.setText(count > 0
+            ? "На телефоне: " + count + " · отправятся в Буфер при доступном Advisor"
+            : "Сохраним карточку здесь и отправим в Буфер при подключении");
+    }
+
+    private void enqueue() {
+        if (currentCapture == null) return;
         String owner = pending.owner();
         if (owner.isEmpty()) {
-            message.setText("Сначала один раз откройте Advisor под VPN и войдите в аккаунт. "
-                + "После этого можно сохранять товары без VPN. Карточка пока не поставлена в очередь.");
+            status.setText("Вход в Advisor ещё не подтверждён. Откройте приложение с VPN, "
+                + "войдите и дождитесь проверки аккаунта. Возвращаться к товару не нужно.");
             return;
         }
         if (!pending.enqueue(owner, currentCapture)) {
-            message.setText("Не удалось сохранить карточку в памяти телефона или очередь заполнена. "
-                + "Ничего не отправлено.");
+            status.setText("Не удалось сохранить карточку на телефоне или очередь заполнена.");
             return;
         }
         currentCapture = null;
-        updatePreview(null);
-        updateQueueStatus();
-        message.setText("Карточка сохранена на телефоне. Включите VPN и откройте Advisor: "
-            + "очередь отправится в ваш Буфер. Можно продолжать добавлять товары.");
-        Toast.makeText(this, "Сохранено на телефоне · отправим при подключении", Toast.LENGTH_LONG).show();
+        setPreview(null);
+        showQueueCount();
+        status.setText("Сохранено на телефоне. Откройте Advisor с VPN — карточка попадёт в Буфер.");
+        Toast.makeText(this, "Сохранено на телефоне", Toast.LENGTH_SHORT).show();
     }
 
-    private static final class HttpAnswer {
-        final int status;
-        final String body;
-        HttpAnswer(int status, String body) { this.status=status; this.body=body; }
-    }
-
-    /**
-     * Cookies are taken only from the Advisor WebView. Never sent to source
-     * pages or persisted with captured cards. The server decides the user.
-     */
-    private HttpAnswer advisorRequest(String endpoint, String cookie, String json)
-        throws Exception {
-        HttpURLConnection connection = null;
-        try {
-            URL url = new URL(APP_ORIGIN + endpoint);
-            connection = (HttpURLConnection) url.openConnection();
-            connection.setInstanceFollowRedirects(false);
-            connection.setConnectTimeout(6500);
-            connection.setReadTimeout(16000);
-            connection.setRequestProperty("Accept", "application/json");
-            connection.setRequestProperty("Cookie", cookie);
-            if (json != null) {
-                connection.setRequestMethod("POST");
-                connection.setDoOutput(true);
-                connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
-                byte[] bytes = json.getBytes(StandardCharsets.UTF_8);
-                if (bytes.length > 100_000) throw new IllegalStateException("Карточка слишком большая.");
-                try (java.io.OutputStream out = connection.getOutputStream()) { out.write(bytes); }
-            }
-            int status = connection.getResponseCode();
-            InputStream stream = status >= 400 ? connection.getErrorStream() : connection.getInputStream();
-            String result = "";
-            if (stream != null) {
-                try (InputStream input = stream;
-                     ByteArrayOutputStream out = new ByteArrayOutputStream()) {
-                    byte[] buffer = new byte[4096];
-                    int count;
-                    while ((count = input.read(buffer)) != -1) {
-                        if (out.size() + count > 120_000) throw new IllegalStateException("Слишком большой ответ сервера.");
-                        out.write(buffer, 0, count);
-                    }
-                    result = out.toString(StandardCharsets.UTF_8.name());
-                }
-            }
-            return new HttpAnswer(status, result);
-        } finally {
-            if (connection != null) connection.disconnect();
-        }
-    }
-
-    private void checkSessionAndSync(boolean userInitiated) {
-        if (checkingSession) return;
+    private void verifySession(boolean explicit) {
+        if (sessionBusy || syncBusy || !advisorHost(advisor.getUrl())) return;
         long now = System.currentTimeMillis();
-        if (!userInitiated && now - lastSessionCheck < 8000) return;
-        checkingSession = true;
-        new Thread(() -> {
-            String problem = null;
-            String verified = null;
-            int sent = 0;
-            boolean differentAccount = false;
-            try {
-                CookieManager.getInstance().flush();
-                String cookies = CookieManager.getInstance().getCookie(APP_ORIGIN);
-                if (cookies == null || cookies.isEmpty()) throw new IllegalStateException("Сначала войдите в Advisor.");
-                HttpAnswer response = advisorRequest("/api/android-capture/session", cookies, null);
-                if (response.status != 200) throw new IllegalStateException(
-                    response.status == 401 ? "Нужно войти в Advisor." :
-                    response.status == 403 ? "Нет доступа к Буферу в этом аккаунте." :
-                    "Нет связи с Advisor (код " + response.status + ").");
-                JSONObject session = new JSONObject(response.body);
-                verified = session.optString("userId", "");
-                String oldOwner = pending.owner();
-                pending.setVerifiedOwner(verified);
-                differentAccount = !oldOwner.isEmpty() && !oldOwner.equals(verified);
-                // Only read entries for the just-verified account. Switching the
-                // Advisor login can NEVER transfer another account's captures.
-                for (int index=0; index<60; index++) {
-                    JSONObject queued = pending.firstFor(verified);
-                    if (queued == null) break;
-                    JSONObject capture = queued.optJSONObject("capture");
-                    String id = queued.optString("id");
-                    if (capture == null || id.isEmpty()) break;
-                    String path = endpointForKind(capture.optString("kind"));
-                    if (path == null) throw new IllegalStateException(
-                        "В очереди неподдерживаемая карточка. Она сохранена локально.");
-                    HttpAnswer save = advisorRequest(path, cookies,
-                        "{\"capture\":" + capture.toString() + "}");
-                    JSONObject result;
-                    try { result = new JSONObject(save.body); }
-                    catch (Exception e) { throw new IllegalStateException(
-                        "Не получено подтверждение сохранения. Карточка осталась в очереди."); }
-                    JSONObject saved = result.optJSONObject("saved");
-                    if (save.status < 200 || save.status >= 300
-                        || saved == null || saved.optString("id").isEmpty()) {
-                        throw new IllegalStateException(
-                            result.optString("error", "Сервер не подтвердил сохранение (" + save.status + ")."));
-                    }
-                    if (!pending.remove(verified, id)) {
-                        throw new IllegalStateException("Карточка записана в Буфер, но локальная очередь не обновлена.");
-                    }
-                    sent++;
+        if (!explicit && now - lastSessionCheckAt < 3000) return;
+        lastSessionCheckAt = now;
+        sessionBusy = true;
+        final int generation = ++sessionGeneration;
+        final String requestId = UUID.randomUUID().toString();
+        String script = "(function(){"
+            + "const id=" + JSONObject.quote(requestId) + ";"
+            + "window.__paAndroidSession={id:id,done:false};"
+            + "fetch('/api/android-capture/session',{credentials:'same-origin',cache:'no-store'})"
+            + ".then(async r=>{const data=await r.json().catch(()=>({}));"
+            + "window.__paAndroidSession={id:id,done:true,ok:r.ok,status:r.status,"
+            + "userId:data.userId||'',error:data.error||''};})"
+            + ".catch(()=>{window.__paAndroidSession={id:id,done:true,ok:false,"
+            + "status:0,error:'Нет связи с Advisor'};});"
+            + "return true;})()";
+        advisor.evaluateJavascript(script, ignored -> pollSession(generation, requestId, 0, explicit));
+    }
+
+    private void pollSession(int generation, String id, int step, boolean explicit) {
+        if (generation != sessionGeneration) return;
+        if (step > 26) {
+            sessionBusy = false;
+            if (explicit && captureVisible) status.setText("Сервер не ответил. Очередь не потеряна.");
+            return;
+        }
+        handler.postDelayed(() -> advisor.evaluateJavascript(
+            "JSON.stringify(window.__paAndroidSession||null)", answer -> {
+                if (generation != sessionGeneration) return;
+                JSONObject result = decoded(answer);
+                if (result == null || !id.equals(result.optString("id")) || !result.optBoolean("done")) {
+                    pollSession(generation, id, step + 1, explicit);
+                    return;
                 }
-            } catch (Exception ex) {
-                problem = ex.getMessage();
+                sessionBusy = false;
+                if (!result.optBoolean("ok")) {
+                    if (explicit && captureVisible)
+                        status.setText(result.optInt("status") == 401
+                            ? "Войдите в Advisor с VPN. Карточки на телефоне сохранены."
+                            : result.optString("error", "Соединение недоступно."));
+                    return;
+                }
+                String verified = result.optString("userId", "");
+                String prior = pending.owner();
+                try { pending.setVerifiedOwner(verified); }
+                catch (Exception error) {
+                    if (captureVisible) status.setText("Ошибка подтверждения аккаунта.");
+                    return;
+                }
+                showQueueCount();
+                if (!prior.isEmpty() && !prior.equals(verified)) {
+                    if (captureVisible) status.setText("Аккаунт изменён. Очередь предыдущего пользователя не отправляется.");
+                    return;
+                }
+                if (pending.countFor(verified) > 0) {
+                    syncBusy = true;
+                    currentSyncOwner = verified;
+                    syncedThisPass = 0;
+                    syncOne(verified);
+                } else if (explicit && captureVisible) {
+                    status.setText("Аккаунт подтверждён. Ожидающих карточек нет.");
+                }
+            }), 430);
+    }
+
+    private void syncOne(String owner) {
+        if (!syncBusy || !advisorHost(advisor.getUrl())) { syncBusy = false; return; }
+        JSONObject next = pending.firstFor(owner);
+        if (next == null) {
+            syncBusy = false;
+            showQueueCount();
+            if (syncedThisPass > 0) {
+                Toast.makeText(this, "В Буфер отправлено: " + syncedThisPass, Toast.LENGTH_LONG).show();
+                if (!captureVisible && advisor.getUrl() != null
+                        && advisor.getUrl().startsWith(ORIGIN + "/capture")) advisor.reload();
+                if (captureVisible) status.setText("Все ожидающие карточки отправлены в Буфер: " + syncedThisPass);
             }
-            final int sentCount = sent;
-            final String failure = problem;
-            final boolean accountChanged = differentAccount;
-            final String user = verified;
-            handler.post(() -> {
-                checkingSession = false;
-                lastSessionCheck = failure == null ? System.currentTimeMillis() : 0;
-                updateQueueStatus();
-                if (sentCount > 0) {
-                    Toast.makeText(this, "В Буфер отправлено: " + sentCount,
-                        Toast.LENGTH_LONG).show();
-                    if (!showingCapture && appView.getUrl() != null
-                        && appView.getUrl().startsWith(APP_ORIGIN + "/capture")) {
-                        appView.reload();
-                    }
+            return;
+        }
+        JSONObject capture = next.optJSONObject("capture");
+        String itemId = next.optString("id");
+        String path = capture == null ? null : endpoint(capture.optString("kind"));
+        if (path == null || itemId.isEmpty()) {
+            syncFailed("Очередная карточка повреждена или её категория не поддерживается.");
+            return;
+        }
+        int generation = ++saveGeneration;
+        String reqId = UUID.randomUUID().toString();
+        String payload = "{\"capture\":" + capture.toString() + "}";
+        String javascript = "(function(){const id=" + JSONObject.quote(reqId) + ";"
+            + "window.__paAndroidSave={id:id,done:false};"
+            + "fetch(" + JSONObject.quote(path) + ",{method:'POST',credentials:'same-origin',"
+            + "headers:{'content-type':'application/json'},body:" + JSONObject.quote(payload) + "})"
+            + ".then(async r=>{const body=await r.json().catch(()=>({}));"
+            + "window.__paAndroidSave={id:id,done:true,ok:r.ok,savedId:body.saved?.id||'',"
+            + "error:body.error||body.message||'',code:r.status};})"
+            + ".catch(()=>{window.__paAndroidSave={id:id,done:true,ok:false,error:'Нет соединения'};});"
+            + "return true;})()";
+        advisor.evaluateJavascript(javascript, ignored ->
+            pollSave(owner, itemId, reqId, generation, 0));
+    }
+
+    private void pollSave(String owner, String itemId, String reqId, int generation, int step) {
+        if (!syncBusy || generation != saveGeneration) return;
+        if (step > 46) { syncFailed("Нет подтверждения сервера. Повторите при подключении."); return; }
+        handler.postDelayed(() -> advisor.evaluateJavascript(
+            "JSON.stringify(window.__paAndroidSave||null)", raw -> {
+                if (!syncBusy || generation != saveGeneration) return;
+                JSONObject result = decoded(raw);
+                if (result == null || !reqId.equals(result.optString("id")) || !result.optBoolean("done")) {
+                    pollSave(owner, itemId, reqId, generation, step + 1);
+                    return;
                 }
-                if (showingCapture) {
-                    if (failure != null && userInitiated) {
-                        message.setText("Синхронизация: " + failure
-                            + " Ожидающие карточки остались на телефоне.");
-                    } else if (sentCount > 0) {
-                        message.setText("Отправлено в настоящий Буфер: " + sentCount
-                            + ". Остальные записи, если есть, сохраняются на телефоне.");
-                    } else if (accountChanged) {
-                        message.setText("Вошли в другой аккаунт. Чужая очередь не отправлена. "
-                            + "Вернитесь в прежний аккаунт, чтобы передать его карточки.");
-                    } else if (userInitiated && failure == null) {
-                        message.setText("Соединение с Advisor есть, очередь текущего аккаунта пуста.");
-                    }
-                } else if (userInitiated && failure != null) {
-                    Toast.makeText(this, "Очередь сохранена: " + failure,
-                        Toast.LENGTH_LONG).show();
+                if (!result.optBoolean("ok") || result.optString("savedId").isEmpty()) {
+                    syncFailed(result.optString("error", "Сервер не подтвердил сохранение."));
+                    return;
                 }
-            });
-        }).start();
+                if (!pending.remove(owner, itemId)) {
+                    syncFailed("Сервер сохранил карточку, но локальная очередь не обновилась.");
+                    return;
+                }
+                syncedThisPass++;
+                showQueueCount();
+                syncOne(owner);
+            }), 390);
+    }
+
+    private void syncFailed(String problem) {
+        syncBusy = false;
+        showQueueCount();
+        if (captureVisible) status.setText("Очередь сохранена. " + problem);
+        else if (syncedThisPass > 0)
+            Toast.makeText(this, "Отправлено " + syncedThisPass + ", остальное осталось на телефоне", Toast.LENGTH_LONG).show();
+    }
+
+    private void periodicAccountCheck() {
+        // Short checks help recognize SPA login without a top native toolbar.
+        // Do not generate traffic on the critical path after the account has
+        // been verified and there is no pending work.
+        if (!isFinishing() && !captureVisible && advisorHost(advisor.getUrl())) {
+            String owner = pending.owner();
+            if (owner.isEmpty() || pending.countFor(owner) > 0) verifySession(false);
+        }
+        if (!isFinishing()) handler.postDelayed(this::periodicAccountCheck, 10500);
     }
 
     @Override protected void onResume() {
         super.onResume();
-        if (pending != null) handler.postDelayed(() -> checkSessionAndSync(false), 650);
+        if (pending != null && advisor != null && !captureVisible)
+            handler.postDelayed(() -> verifySession(false), 650);
     }
 
     @Override public void onBackPressed() {
-        if (showingCapture) {
-            showCapture(false);
-        } else if (appView.canGoBack()) {
-            appView.goBack();
-        } else {
-            super.onBackPressed();
-        }
+        if (captureVisible) leaveCapture();
+        else if (advisor.canGoBack()) advisor.goBack();
+        else super.onBackPressed();
     }
 
     @Override protected void onDestroy() {
-        captureSequence++;
-        saveSequence++;
-        sourceView.destroy();
-        appView.destroy();
+        captureGeneration++;
+        saveGeneration++;
+        sessionGeneration++;
+        handler.removeCallbacksAndMessages(null);
+        if (uploadCallback != null) uploadCallback.onReceiveValue(null);
+        if (source != null) source.destroy();
+        if (advisor != null) advisor.destroy();
         super.onDestroy();
     }
 }

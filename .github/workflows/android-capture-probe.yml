@@ -39,6 +39,7 @@ jobs:
           test ! -e android-capture-probe/app/src/main/assets/probe.js
           test "$(wc -c < android-capture-probe/app/src/main/assets/shared-parser.js)" -gt 100000
           node --check android-capture-probe/app/src/main/assets/shared-parser.js
+          node --test android-capture-probe/tests/shell.test.cjs
       - name: Assemble debug APK
         working-directory: android-capture-probe
         run: gradle --no-daemon :app:assembleDebug
