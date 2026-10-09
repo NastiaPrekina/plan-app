@@ -1,3 +1,46 @@
+# Advisor Android v1.0 beta — Share and done
+
+For users, the entire capture scenario is one action:
+
+**On Ozon/Wildberries/Steam/etc → Share → Advisor.** No preview,
+no technical buttons, no second confirmation screen. The existing Browser
+Helper is bundled in the APK and runs locally even if Advisor is inaccessible
+without VPN. The processing view closes automatically and returns to the source app.
+
+Status language must distinguish:
+- "Сохранено на телефоне — добавится при подключении": a private,
+  durable, user-scoped outbox record, **not yet in the real Buffer**.
+- "Добавлено в Буфер": shown only after the existing authenticated API
+  confirms `saved.id`, whereupon that individual queue item is removed.
+- "Не удалось распознать / сохранить": the item was **not** accepted.
+
+Users never manually manage, inspect, or upload the private queue.
+On reopening the normal Advisor UI with a working connection, the app
+verifies the exact authenticated user and retries sync automatically.
+Owner isolation remains in PendingCaptureStore; no backend write is
+attempted for an unknown account. Repeated identical source captures
+are deduplicated. Queue remains intact on failures.
+
+Auto-save **fails closed** for incomplete parsing, missing product price/photo,
+missing event venue/date, invalid title, unknown kind, or source mismatch.
+It never saves a different page just because the hostname matches.
+Only a short transient status view and Android Toast appear; OS notifications
+are emitted if notification permission is already granted. No permission
+prompt is required to capture.
+
+The ordinary Advisor web interface stays unchanged; there is no extra
+native toolbar. The shared source parser is not reimplemented.
+
+The user must first sign in to Advisor while it is reachable, for
+account attribution. VPN is not needed during source capture but is
+still required for eventual sync if Advisor cannot be accessed otherwise.
+Sync occurs while the app is running/foregrounded; no background service.
+
+IMPORTANT: beta APKs use debug signing keys that can change on CI runners.
+Before uninstalling v0.9, ensure pending items are delivered, as uninstalling
+destroys private storage. This release does not touch production server/DB,
+migrate user data or overwrite the existing app UI.
+
 # Advisor Android v0.9 beta: normal full-screen app + reliable account binding
 
 ## What changed

@@ -1,6 +1,11 @@
 package online.moyadvisor.captureprobe;
 
 import android.app.Activity;
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.os.Build;
+import android.content.pm.PackageManager;
 import android.content.Intent;
 import android.graphics.Color;
 import android.net.Uri;
@@ -16,10 +21,8 @@ import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
-import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
-import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 import android.view.WindowManager;
@@ -51,15 +54,13 @@ public final class MainActivity extends Activity {
     private PendingCaptureStore pending;
     private WebView advisor, source;
     private LinearLayout captureLayer;
-    private TextView status, queueInfo, preview;
-    private Button saveButton;
+    private TextView status;
     private ValueCallback<Uri[]> uploadCallback;
-    private String sharedUrl, parser;
-    private JSONObject currentCapture;
+    private String parser;
+    private boolean captureCompleted = false;
     private boolean captureVisible = false, sessionBusy = false, syncBusy = false;
     private int captureGeneration = 0, saveGeneration = 0, sessionGeneration = 0;
     private long lastSessionCheckAt = 0;
-    private String currentSyncOwner = "";
     private int syncedThisPass = 0;
 
     @Override public void onCreate(Bundle saved) {
@@ -81,6 +82,7 @@ public final class MainActivity extends Activity {
         super.onNewIntent(intent);
         setIntent(intent);
         if (isSharedIntent(intent)) handleSharedIntent(intent);
+        else openAdvisor();
     }
 
     private boolean isSharedIntent(Intent intent) {
@@ -97,15 +99,6 @@ public final class MainActivity extends Activity {
         view.setTextSize(size);
         view.setTextColor(Color.rgb(40, 48, 50));
         return view;
-    }
-
-    private Button button(String value, View.OnClickListener onClick) {
-        Button button = new Button(this);
-        button.setAllCaps(false);
-        button.setText(value);
-        button.setTextSize(13);
-        button.setOnClickListener(onClick);
-        return button;
     }
 
     private void webSettings(WebView webview) {
@@ -197,36 +190,13 @@ public final class MainActivity extends Activity {
         root.addView(captureLayer, new FrameLayout.LayoutParams(-1, -1));
         captureLayer.setVisibility(View.GONE);
 
-        LinearLayout header = new LinearLayout(this);
-        header.setOrientation(LinearLayout.HORIZONTAL);
-        header.setGravity(Gravity.CENTER_VERTICAL);
-        captureLayer.addView(header, new LinearLayout.LayoutParams(-1, dp(54)));
-        TextView heading = text("Добавить в Буфер", 19);
-        heading.setTypeface(null, 1);
-        header.addView(heading, new LinearLayout.LayoutParams(0, -2, 1));
-        Button close = button("✕", v -> leaveCapture());
-        close.setContentDescription("Закрыть захват");
-        header.addView(close, new LinearLayout.LayoutParams(dp(52), dp(48)));
+        status = text("Получаем карточку…", 18);
+        status.setGravity(Gravity.CENTER);
+        status.setPadding(dp(22), dp(25), dp(22), dp(25));
+        captureLayer.addView(status, new LinearLayout.LayoutParams(-1, dp(110)));
 
-        queueInfo = text("", 12);
-        queueInfo.setPadding(dp(4), dp(3), dp(4), dp(5));
-        queueInfo.setOnClickListener(v -> {
-            if (!captureVisible) return;
-            if (!advisorHost(advisor.getUrl())) {
-                status.setText("Для отправки включите VPN и откройте Advisor.");
-            } else {
-                verifySession(true);
-            }
-        });
-        captureLayer.addView(queueInfo);
-
-        status = text("Открываю страницу товара…", 14);
-        status.setPadding(dp(4), dp(7), dp(4), dp(10));
-        captureLayer.addView(status);
-
-        // A separate WebView is required for rendering source DOM. It stays
-        // behind an opaque, non-interactive preview while it loads, so the
-        // user sees Advisor's capture UI, not a second browser application.
+        // Source WebView is attached and laid out for dynamic product sites,
+        // but covered by an opaque status layer. No preview or confirmation UI.
         FrameLayout worker = new FrameLayout(this);
         captureLayer.addView(worker, new LinearLayout.LayoutParams(-1, 0, 1));
         source = new WebView(this);
@@ -237,21 +207,20 @@ public final class MainActivity extends Activity {
                 if (!request.isForMainFrame()) return false;
                 Uri target = request.getUrl();
                 if ("https".equalsIgnoreCase(target.getScheme()) && !HOST.equalsIgnoreCase(target.getHost())) return false;
-                status.setText("Нельзя читать служебную страницу вместо товара.");
+                finishShare(false, "Ссылку не удалось обработать. Карточка не добавлена.");
                 return true;
             }
             @Override public void onPageStarted(WebView view, String url, android.graphics.Bitmap icon) {
                 captureGeneration++;
-                currentCapture = null;
-                setPreview(null);
-                status.setText("Загружаю карточку…");
+                status.setText("Распознаём карточку…");
             }
             @Override public void onPageFinished(WebView view, String url) {
+                if (captureCompleted) return;
                 int generation = captureGeneration;
                 handler.postDelayed(() -> injectParser(generation), 350);
             }
             @Override public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
-                if (request.isForMainFrame()) status.setText("Страница не открылась: " + error.getDescription());
+                if (request.isForMainFrame()) finishShare(false, "Не удалось открыть страницу товара.");
             }
         });
         worker.addView(source, new FrameLayout.LayoutParams(-1, -1));
@@ -259,27 +228,12 @@ public final class MainActivity extends Activity {
         overlay.setOrientation(LinearLayout.VERTICAL);
         overlay.setBackgroundColor(Color.rgb(248, 250, 249));
         overlay.setGravity(Gravity.CENTER);
-        TextView hint = text("Карточка распознаётся на телефоне.\nVPN для этого не требуется.", 14);
+        TextView hint = text("Advisor обрабатывает ссылку…", 15);
         hint.setGravity(Gravity.CENTER);
         hint.setPadding(dp(28), dp(14), dp(28), dp(14));
         overlay.addView(hint);
         worker.addView(overlay, new FrameLayout.LayoutParams(-1, -1));
 
-        ScrollView scroller = new ScrollView(this);
-        captureLayer.addView(scroller, new LinearLayout.LayoutParams(-1, dp(165)));
-        preview = text("Данные появятся после распознавания.", 14);
-        preview.setTextIsSelectable(true);
-        preview.setPadding(dp(8), dp(12), dp(8), dp(12));
-        scroller.addView(preview);
-
-        LinearLayout actions = new LinearLayout(this);
-        captureLayer.addView(actions, new LinearLayout.LayoutParams(-1, dp(54)));
-        Button retry = button("Повторить", v -> retry());
-        actions.addView(retry, new LinearLayout.LayoutParams(0, -1, 1));
-        saveButton = button("Сохранить", v -> enqueue());
-        saveButton.setEnabled(false);
-        actions.addView(saveButton, new LinearLayout.LayoutParams(0, -1, 2));
-        showQueueCount();
     }
 
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
@@ -303,9 +257,11 @@ public final class MainActivity extends Activity {
     }
 
     private void leaveCapture() {
+        captureGeneration++;
+        captureCompleted = true;
         showCapture(false);
-        if (advisor.getUrl() == null) advisor.loadUrl(ORIGIN + "/");
-        else verifySession(false);
+        // Do not fetch Advisor while VPN may be disabled.
+        moveTaskToBack(true);
     }
 
     private String firstHttps(String text) {
@@ -328,15 +284,14 @@ public final class MainActivity extends Activity {
         String payload = intent.getStringExtra(Intent.EXTRA_TEXT);
         if (payload == null || payload.isEmpty()) payload = intent.getStringExtra(Intent.EXTRA_HTML_TEXT);
         String url = firstHttps(payload);
+        captureGeneration++;
+        captureCompleted = false;
         showCapture(true);
-        currentCapture = null;
-        setPreview(null);
-        showQueueCount();
+        status.setText("Получаем карточку…");
         if (url == null) {
-            status.setText("Не удалось найти ссылку HTTPS. Попробуйте «Поделиться» ещё раз.");
+            finishShare(false, "Не удалось получить ссылку. Карточка не добавлена.");
             return;
         }
-        sharedUrl = url;
         source.loadUrl(url);
     }
 
@@ -356,24 +311,18 @@ public final class MainActivity extends Activity {
             parser = result;
             return result;
         } catch (Exception ex) {
-            status.setText("Ошибка встроенного парсера: " + ex.getMessage());
+            finishShare(false, "Не удалось обработать ссылку.");
             return null;
         }
     }
 
-    private void retry() {
-        setPreview(null);
-        if (source.getUrl() == null && sharedUrl != null) source.loadUrl(sharedUrl);
-        else injectParser(captureGeneration);
-    }
-
     private void injectParser(int generation) {
-        if (generation != captureGeneration || !captureVisible) return;
+        if (generation != captureGeneration || !captureVisible || captureCompleted) return;
         String script = sharedParser();
         if (script == null) return;
-        status.setText("Распознаю карточку…");
+        status.setText("Распознаём карточку…");
         source.evaluateJavascript(script, ignored -> {
-            if (generation == captureGeneration) pollCapture(generation, 0);
+            if (generation == captureGeneration && !captureCompleted) pollCapture(generation, 0);
         });
     }
 
@@ -385,14 +334,14 @@ public final class MainActivity extends Activity {
     }
 
     private void pollCapture(int generation, int step) {
-        if (generation != captureGeneration || !captureVisible) return;
-        if (step > 22) {
-            status.setText("Не удалось завершить захват. Попробуйте ещё раз.");
+        if (generation != captureGeneration || !captureVisible || captureCompleted) return;
+        if (step > 30) {
+            finishShare(false, "Не удалось распознать карточку. Попробуйте ещё раз.");
             return;
         }
         handler.postDelayed(() -> source.evaluateJavascript(
             "JSON.stringify(window.__paAndroidCaptureResult || null)", raw -> {
-                if (generation != captureGeneration || !captureVisible) return;
+                if (generation != captureGeneration || !captureVisible || captureCompleted) return;
                 JSONObject result = decoded(raw);
                 if (result == null || !result.optBoolean("done")) {
                     pollCapture(generation, step + 1);
@@ -400,36 +349,21 @@ public final class MainActivity extends Activity {
                 }
                 JSONObject capture = result.optJSONObject("capture");
                 if (capture == null) {
-                    status.setText(result.optString("error", "Карточка не распознана."));
+                    finishShare(false, "Карточка не распознана и не добавлена.");
                     return;
                 }
                 Uri origin = Uri.parse(capture.optString("sourceUrl", ""));
                 Uri current = Uri.parse(source.getUrl() == null ? "" : source.getUrl());
-                if (!"https".equalsIgnoreCase(origin.getScheme())
-                        || origin.getHost() == null || current.getHost() == null
-                        || !origin.getHost().equalsIgnoreCase(current.getHost())) {
-                    status.setText("Источник карточки не соответствует открытой странице.");
+                if (!sameSourcePage(origin, current)) {
+                    finishShare(false, "Ссылка не соответствует карточке. Не добавлено.");
                     return;
                 }
-                currentCapture = capture;
-                setPreview(capture);
-                status.setText(result.optBoolean("incomplete")
-                    ? "Некоторые поля неполные — проверьте данные перед сохранением."
-                    : "Проверьте карточку и нажмите «Сохранить».");
+                if (result.optBoolean("incomplete") || !validForAutomaticSave(capture)) {
+                    finishShare(false, "Недостаточно данных для добавления. Карточка не сохранена.");
+                    return;
+                }
+                enqueueAutomatically(capture);
             }), 550);
-    }
-
-    private String categoryName(String kind) {
-        switch (kind) {
-            case "product": return "Товар";
-            case "game": return "Игра";
-            case "screen": return "Фильм / сериал";
-            case "book": return "Книга / аудиокнига";
-            case "event": return "Событие";
-            case "place": return "Заведение";
-            case "hotel": return "Отель";
-            default: return "Карточка";
-        }
     }
 
     private String endpoint(String kind) {
@@ -445,51 +379,111 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private void setPreview(JSONObject card) {
-        if (card == null) {
-            preview.setText("Данные появятся после распознавания.");
-            saveButton.setEnabled(false);
-            return;
+
+    /**
+     * No confirmation screen: only unambiguous, adequately populated cards
+     * can be stored automatically. Incomplete captures fail closed.
+     */
+    private boolean validForAutomaticSave(JSONObject capture) {
+        if (capture == null) return false;
+        String kind = capture.optString("kind", "");
+        String title = capture.optString("title", "").trim();
+        String url = capture.optString("sourceUrl", "");
+        if (endpoint(kind) == null || title.length() < 4 || title.equals("...")
+                || title.equalsIgnoreCase("распродажа") || !url.startsWith("https://")) return false;
+        switch (kind) {
+            case "product":
+                return capture.optDouble("price", 0) > 0 && !capture.optString("imageUrl").isEmpty();
+            case "event":
+                return !capture.optString("city").isEmpty()
+                    && !capture.optString("venueName").isEmpty()
+                    && !capture.optString("imageUrl").isEmpty()
+                    && (!capture.optString("startDate").isEmpty()
+                        || "recurring_booking".equals(capture.optString("occurrenceType")));
+            case "book":
+            case "screen":
+            case "game":
+            case "place":
+            case "hotel":
+                return !capture.optString("imageUrl").isEmpty();
+            default: return false;
         }
-        String title = card.optString("title", "");
-        StringBuilder body = new StringBuilder(categoryName(card.optString("kind")))
-            .append("\n").append(title);
-        if (!card.isNull("price") && card.has("price"))
-            body.append("\nЦена: ").append(card.optString("price")).append(" ").append(card.optString("currency"));
-        if (!card.optString("startDate").isEmpty()) body.append("\nДата: ").append(card.optString("startDate"));
-        if (!card.optString("venueName").isEmpty()) body.append("\nМесто: ").append(card.optString("venueName"));
-        body.append("\nИсточник: ").append(card.optString("sourceUrl"));
-        preview.setText(body.toString());
-        saveButton.setEnabled(endpoint(card.optString("kind")) != null
-            && title.trim().length() >= 4 && !title.trim().equals("..."));
     }
 
-    private void showQueueCount() {
-        if (queueInfo == null || pending == null) return;
-        String owner = pending.owner();
-        int count = owner.isEmpty() ? pending.totalCount() : pending.countFor(owner);
-        queueInfo.setText(count > 0
-            ? "На телефоне: " + count + " · отправятся в Буфер при доступном Advisor"
-            : "Сохраним карточку здесь и отправим в Буфер при подключении");
+
+    private boolean sameSourcePage(Uri card, Uri page) {
+        if (!"https".equalsIgnoreCase(card.getScheme()) || card.getHost() == null
+                || page.getHost() == null || !card.getHost().equalsIgnoreCase(page.getHost())) return false;
+        String a = card.getPath() == null ? "/" : card.getPath().replaceAll("/+$", "");
+        String b = page.getPath() == null ? "/" : page.getPath().replaceAll("/+$", "");
+        if (a.equals(b)) return true;
+        // Some shops change human-readable slugs after redirect, retaining
+        // their stable product or catalog ID. Never accept same-domain-only.
+        String idA = stablePageId(a), idB = stablePageId(b);
+        return !idA.isEmpty() && idA.equals(idB);
     }
 
-    private void enqueue() {
-        if (currentCapture == null) return;
+    private String stablePageId(String path) {
+        Matcher wb = Pattern.compile("/catalog/(\\d{6,})/", Pattern.CASE_INSENSITIVE).matcher(path);
+        if (wb.find()) return wb.group(1);
+        Matcher kp = Pattern.compile("/(?:film|series)/(\\d+)", Pattern.CASE_INSENSITIVE).matcher(path);
+        if (kp.find()) return kp.group(1);
+        Matcher steam = Pattern.compile("/app/(\\d+)", Pattern.CASE_INSENSITIVE).matcher(path);
+        if (steam.find()) return steam.group(1);
+        Matcher tail = Pattern.compile("(?:-|/)(\\d{6,})(?:/?$)").matcher(path);
+        return tail.find() ? tail.group(1) : "";
+    }
+
+    private void enqueueAutomatically(JSONObject capture) {
         String owner = pending.owner();
         if (owner.isEmpty()) {
-            status.setText("Вход в Advisor ещё не подтверждён. Откройте приложение с VPN, "
-                + "войдите и дождитесь проверки аккаунта. Возвращаться к товару не нужно.");
+            finishShare(false, "Не удалось сохранить: сначала войдите в Advisor.");
             return;
         }
-        if (!pending.enqueue(owner, currentCapture)) {
-            status.setText("Не удалось сохранить карточку на телефоне или очередь заполнена.");
+        if (!pending.enqueue(owner, capture)) {
+            finishShare(false, "Не удалось сохранить. Возможно, память очереди заполнена.");
             return;
         }
-        currentCapture = null;
-        setPreview(null);
-        showQueueCount();
-        status.setText("Сохранено на телефоне. Откройте Advisor с VPN — карточка попадёт в Буфер.");
-        Toast.makeText(this, "Сохранено на телефоне", Toast.LENGTH_SHORT).show();
+        finishShare(true, "Ссылка принята. Добавим в Буфер, когда Advisor будет доступен.");
+        // When already connected, attempt immediate user-scoped upload.
+        // Failure will never remove the queued card.
+        if (advisorHost(advisor.getUrl())) verifySession(false);
+    }
+
+    private void finishShare(boolean accepted, String message) {
+        if (captureCompleted) return;
+        captureCompleted = true;
+        captureGeneration++;
+        status.setText(message);
+        Toast.makeText(this, message, accepted ? Toast.LENGTH_SHORT : Toast.LENGTH_LONG).show();
+        notifyUser(accepted ? "Сохранено на телефоне" : "Не удалось добавить",
+            message, accepted ? 1201 : 1202);
+        // Return to the source app without opening Advisor (VPN may be OFF).
+        handler.postDelayed(() -> {
+            if (captureCompleted && captureVisible) leaveCapture();
+        }, accepted ? 900 : 2200);
+    }
+
+    private void notifyUser(String title, String detail, int id) {
+        if (Build.VERSION.SDK_INT >= 33 &&
+                checkSelfPermission("android.permission.POST_NOTIFICATIONS") != PackageManager.PERMISSION_GRANTED) {
+            return; // Toast remains available; no disruptive permission prompt.
+        }
+        NotificationManager manager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+        if (manager == null) return;
+        String channel = "advisor_buffer";
+        if (Build.VERSION.SDK_INT >= 26) {
+            manager.createNotificationChannel(new NotificationChannel(
+                channel, "Advisor · Буфер", NotificationManager.IMPORTANCE_DEFAULT));
+        }
+        Notification notification = new Notification.Builder(this, channel)
+            .setSmallIcon(android.R.drawable.stat_sys_upload_done)
+            .setContentTitle(title)
+            .setContentText(detail)
+            .setStyle(new Notification.BigTextStyle().bigText(detail))
+            .setAutoCancel(true)
+            .build();
+        manager.notify(id, notification);
     }
 
     private void verifySession(boolean explicit) {
@@ -543,14 +537,12 @@ public final class MainActivity extends Activity {
                     if (captureVisible) status.setText("Ошибка подтверждения аккаунта.");
                     return;
                 }
-                showQueueCount();
                 if (!prior.isEmpty() && !prior.equals(verified)) {
                     if (captureVisible) status.setText("Аккаунт изменён. Очередь предыдущего пользователя не отправляется.");
                     return;
                 }
                 if (pending.countFor(verified) > 0) {
                     syncBusy = true;
-                    currentSyncOwner = verified;
                     syncedThisPass = 0;
                     syncOne(verified);
                 } else if (explicit && captureVisible) {
@@ -564,12 +556,13 @@ public final class MainActivity extends Activity {
         JSONObject next = pending.firstFor(owner);
         if (next == null) {
             syncBusy = false;
-            showQueueCount();
             if (syncedThisPass > 0) {
-                Toast.makeText(this, "В Буфер отправлено: " + syncedThisPass, Toast.LENGTH_LONG).show();
+                String message = syncedThisPass == 1
+                    ? "Карточка добавлена в Буфер." : "Добавлено в Буфер: " + syncedThisPass;
+                Toast.makeText(this, message, Toast.LENGTH_LONG).show();
+                notifyUser("Добавлено в Буфер", message, 1203);
                 if (!captureVisible && advisor.getUrl() != null
                         && advisor.getUrl().startsWith(ORIGIN + "/capture")) advisor.reload();
-                if (captureVisible) status.setText("Все ожидающие карточки отправлены в Буфер: " + syncedThisPass);
             }
             return;
         }
@@ -616,17 +609,17 @@ public final class MainActivity extends Activity {
                     return;
                 }
                 syncedThisPass++;
-                showQueueCount();
                 syncOne(owner);
             }), 390);
     }
 
     private void syncFailed(String problem) {
         syncBusy = false;
-        showQueueCount();
-        if (captureVisible) status.setText("Очередь сохранена. " + problem);
-        else if (syncedThisPass > 0)
-            Toast.makeText(this, "Отправлено " + syncedThisPass + ", остальное осталось на телефоне", Toast.LENGTH_LONG).show();
+        if (syncedThisPass > 0) {
+            Toast.makeText(this, "Часть карточек добавлена, остальные сохраняются на телефоне", Toast.LENGTH_LONG).show();
+        }
+        notifyUser("Карточка ещё не отправлена",
+            "Сохранили на телефоне. Повторим отправку при доступном Advisor.", 1204);
     }
 
     private void periodicAccountCheck() {
@@ -642,8 +635,12 @@ public final class MainActivity extends Activity {
 
     @Override protected void onResume() {
         super.onResume();
-        if (pending != null && advisor != null && !captureVisible)
+        if (pending == null || advisor == null || captureVisible) return;
+        if (advisor.getUrl() == null && !isSharedIntent(getIntent())) {
+            advisor.loadUrl(ORIGIN + "/");
+        } else {
             handler.postDelayed(() -> verifySession(false), 650);
+        }
     }
 
     @Override public void onBackPressed() {
