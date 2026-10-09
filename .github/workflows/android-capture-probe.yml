@@ -32,9 +32,13 @@ jobs:
         run: |
           set -euo pipefail
           grep -q 'https://app.moyadvisor.online' android-capture-probe/app/src/main/java/online/moyadvisor/captureprobe/MainActivity.java
-          grep -q '/api/android-capture/script' android-capture-probe/app/src/main/java/online/moyadvisor/captureprobe/MainActivity.java
+          grep -q '/api/android-capture/session' android-capture-probe/app/src/main/java/online/moyadvisor/captureprobe/MainActivity.java
+          grep -q 'shared-parser.js' android-capture-probe/app/src/main/java/online/moyadvisor/captureprobe/MainActivity.java
+          grep -q 'PendingCaptureStore' android-capture-probe/app/src/main/java/online/moyadvisor/captureprobe/MainActivity.java
           grep -q '/api/wishlist-preview/save' android-capture-probe/app/src/main/java/online/moyadvisor/captureprobe/MainActivity.java
           test ! -e android-capture-probe/app/src/main/assets/probe.js
+          test "$(wc -c < android-capture-probe/app/src/main/assets/shared-parser.js)" -gt 100000
+          node --check android-capture-probe/app/src/main/assets/shared-parser.js
       - name: Assemble debug APK
         working-directory: android-capture-probe
         run: gradle --no-daemon :app:assembleDebug

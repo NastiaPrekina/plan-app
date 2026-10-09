@@ -1,41 +1,51 @@
-# Advisor for Android: integrated Capture beta
+# Advisor Android v0.8 beta: offline capture with deferred Buffer sync
 
-This is the Android shell for the real `https://app.moyadvisor.online` application.
+## VPN-independent capture
 
-- Uses the same account and authenticated WebView cookies as the Advisor site.
-- Accepts Android ACTION_SEND links from external apps.
-- Loads the shared Browser Helper parser from `/api/android-capture/script` on
-  the live Advisor host after an authenticated session has been established.
-- Runs the shared parser in an isolated WebView on the external HTTPS page.
-  No JavaScript interface or user auth cookies are exposed to those pages.
-- Asks the user before sending a capture to the real Buffer. Saved cards flow
-  through the exact existing user-scoped `/api/wishlist-preview/save` or
-  `/api/browser-capture/{steam,screen,book,event,place,hotel}` handlers.
-- Does not store an API key or service role credentials in the APK.
-- Uses a new Android application ID `online.moyadvisor.app`. It can be
-  installed alongside the old capture probe `online.moyadvisor.captureprobe`.
-  Do not uninstall the old probe before exporting any important history.
+The APK **bundles the generated JavaScript from the production Browser Helper**
+at build time in `app/src/main/assets/shared-parser.js`. The source snapshot
+was generated directly from:
+- `NastiaPrekina/personal-advisor-app` `src/features/wishlist/browser-helper/context-package.ts`
+- its five shared source parser fragments (Event, Place, Trip.com and hotels)
+- the canonical place classification configuration.
 
-## How to use
+The APK no longer fetches `/api/android-capture/script` while capturing a
+product. Future parser improvements require regenerating this asset from
+the upstream source and rebuilding the APK, not writing a separate parser.
 
-1. Install the APK. Open Advisor in the app and log in to your usual account.
-2. Open a product, film, book, event, game or place on your Android phone.
-3. Tap **Поделиться → Advisor**. The source page is parsed with the same
-   code as the desktop Browser Helper. Wait for the preview.
-4. Check the category, title, photo and relevant details, then tap
-   **Добавить в Буфер**.
-5. Advisor displays the save result and opens its real Buffer.
-   Saving requires an authorized session and enabled Capture feature.
-   When session expired, go back to Advisor and log in.
+## Offline-to-Advisor workflow
 
-No backend duplicates or migrations. This shell needs the production endpoint
-`/api/android-capture/script` and place/hotel Capture API routes deployed.
-When unavailable it gives an explicit error, not a false save confirmation.
+1. With VPN enabled, launch **Advisor** APK, sign in to your account, and open
+   the real Buffer once. This caches ONLY the last server-verified user ID.
+2. Disable VPN, share pages from Ozon, Wildberries or other apps using Android
+   "Поделиться → Advisor". The source page is opened and parsed locally.
+3. Review the preview and tap **В очередь Буфера**. The capture is durably
+   saved in Android's private app data with the verified user's ID.
+4. Re-enable VPN and open **Advisor** inside the APK. The app verifies the
+   authenticated account via `GET /api/android-capture/session` and sends the
+   pending captures using the existing per-category Buffer APIs. The toolbar
+   also offers **Отправить** for a manual retry.
+5. Only after the server returns an HTTP 2xx response with a valid `saved.id`
+   is an entry removed from the device. Network errors, rejections, and
+   connection loss preserve it; partial batches resume later.
 
-## Boundaries
+The server, not the client, determines the user on each write. If the
+authenticated account changes, pending captures belonging to another user
+stay on the device and **will not** be uploaded into the new account.
+No login cookies, passwords, bearer tokens, or shared secret are persisted
+in the capture queue. There is a bounded 60-card limit and source-URL
+deduplication. Automatic sync requires reopening the app with connectivity,
+not a continuously running Android background service.
 
-Tested by automated Android APK compilation and server parser contracts.
-Real mobile browser/Android WebView compatibility still requires on-device QA.
-External pages may block WebView or not expose needed content until fully loaded.
-The app intentionally never auto-saves unconfirmed cards. Main app is not
-modified in the isolated plan-app prototype repository.
+## Release and testing
+
+- This build changes only the APK and adds a small authenticated
+  `/api/android-capture/session` route; no new DB tables or migrations.
+- The production Advisor UI remains its existing web app.
+- Android's WebView may fail to load an external website, even if Chrome can.
+- The bundle and native app compile, but the real Android + VPN flow must
+  be verified on the device.
+- Android debug APK signing keys may differ between GitHub Actions runs.
+  Do NOT uninstall an APK with unsent queued items: uninstall wipes the queue.
+  Save them while connected to Advisor before updating. If no queue is pending,
+  uninstalling an older beta and installing v0.8 is safe.
